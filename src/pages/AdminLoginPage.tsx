@@ -1,79 +1,58 @@
+import { signInWithPopup, signOut, type User as FirebaseAuthUser } from 'firebase/auth';
 import { ShieldAlert } from 'lucide-react';
-import { useEffect, useState, type FormEvent } from 'react';
-import { apiFetch } from '../api';
+import { useState } from 'react';
+import { ADMIN_EMAIL, auth, checkIsAdminUser, googleProvider } from '../firebase';
 import type { AdminUser, PageRoute } from '../types';
 
 interface AdminLoginPageProps {
-  onSuccess: (token: string, admin: AdminUser) => void;
+  firebaseUser: FirebaseAuthUser | null;
+  onSuccess: (admin: AdminUser) => void;
   onNavigate: (route: PageRoute) => void;
 }
 
-export function AdminLoginPage({ onSuccess, onNavigate }: AdminLoginPageProps) {
-  const [configured, setConfigured] = useState<boolean | null>(null);
-  const [envConfigured, setEnvConfigured] = useState(false);
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+export function AdminLoginPage({ firebaseUser, onSuccess, onNavigate }: AdminLoginPageProps) {
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
 
-  useEffect(() => {
-    apiFetch<{ configured: boolean; envConfigured: boolean; username: string | null }>('/api/admin/status')
-      .then((res) => {
-        setConfigured(res.configured);
-        setEnvConfigured(res.envConfigured);
-        if (res.username) {
-          setUsername(res.username);
-        }
-      })
-      .catch(() => setConfigured(true));
-  }, []);
-
-  const handleBootstrap = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleAdminSignIn = async () => {
     setError(null);
-    if (password !== confirmPassword) {
-      setError('Password and Confirm Password do not match.');
-      return;
-    }
-    setSubmitting(true);
+    setSigningIn(true);
     try {
-      const res = await apiFetch<{ token: string; admin: AdminUser }>('/api/admin/bootstrap', {
-        method: 'POST',
-        body: { username, password, confirm_password: confirmPassword },
+      let currentUser = firebaseUser;
+      if (!currentUser) {
+        const result = await signInWithPopup(auth, googleProvider);
+        currentUser = result.user;
+      }
+
+      const isAdmin = await checkIsAdminUser(currentUser.uid, currentUser.email);
+      if (!isAdmin) {
+        setError(
+          `Signed in as ${currentUser.email || 'unknown account'}, which does not have Campus Administrator privileges. Sign in with the authorized administrator Google account (${ADMIN_EMAIL}).`
+        );
+        return;
+      }
+
+      onSuccess({
+        admin_id: currentUser.uid,
+        username: currentUser.displayName || 'Campus Administrator',
+        email: currentUser.email || ADMIN_EMAIL,
       });
-      onSuccess(res.token, res.admin);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to initialize administrator account.');
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Google Sign-In could not be completed. Please allow popups and try again.'
+      );
     } finally {
-      setSubmitting(false);
+      setSigningIn(false);
     }
   };
 
-  const handleLogin = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSwitchAccount = async () => {
     setError(null);
-    setSubmitting(true);
-    try {
-      const res = await apiFetch<{ token: string; admin: AdminUser }>('/api/admin/login', {
-        method: 'POST',
-        body: { username, password },
-      });
-      onSuccess(res.token, res.admin);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Invalid administrator credentials.');
-    } finally {
-      setSubmitting(false);
-    }
+    await signOut(auth);
+    await handleAdminSignIn();
   };
-
-  if (configured === null) {
-    return (
-      <div className="mx-auto max-w-md px-4 py-14">
-        <div className="h-64 rounded-xl border border-slate-200 bg-white animate-pulse" />
-      </div>
-    );
-  }
 
   return (
     <div className="mx-auto max-w-md px-4 sm:px-6 py-14">
@@ -85,137 +64,46 @@ export function AdminLoginPage({ onSuccess, onNavigate }: AdminLoginPageProps) {
           </p>
         </div>
 
-        {!configured ? (
-          <>
-            <h1 className="mt-2 font-display text-2xl font-bold text-[#0F2544]">
-              First-Run Administrator Setup
-            </h1>
-            <p className="mt-1.5 text-sm text-slate-600">
-              No campus administrator password has been claimed yet. Choose your administrator username and password to lock and activate the staff console.
-            </p>
+        <h1 className="mt-2 font-display text-2xl font-bold text-[#0F2544]">
+          Administrator Sign In
+        </h1>
+        <p className="mt-1.5 text-sm text-slate-600">
+          Authenticate with your authorized Campus Administrator Google account ({ADMIN_EMAIL}) to moderate reports, review ownership claims, and mark items returned.
+        </p>
 
-            {error && (
-              <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
-                {error}
-              </div>
-            )}
-
-            <form onSubmit={handleBootstrap} className="mt-6 space-y-4">
-              <div>
-                <label htmlFor="admin-setup-user" className="block text-sm font-medium text-[#0F2544]">
-                  Administrator Username
-                </label>
-                <input
-                  id="admin-setup-user"
-                  type="text"
-                  required
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-[#0F2544] focus:border-[#1D4ED8] focus:outline-none focus:ring-2 focus:ring-[#1D4ED8]/20"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="admin-setup-pass" className="block text-sm font-medium text-[#0F2544]">
-                  Choose Password
-                </label>
-                <input
-                  id="admin-setup-pass"
-                  type="password"
-                  required
-                  minLength={8}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Minimum 8 characters"
-                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-[#0F2544] focus:border-[#1D4ED8] focus:outline-none focus:ring-2 focus:ring-[#1D4ED8]/20"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="admin-setup-confirm" className="block text-sm font-medium text-[#0F2544]">
-                  Confirm Password
-                </label>
-                <input
-                  id="admin-setup-confirm"
-                  type="password"
-                  required
-                  minLength={8}
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Re-enter password"
-                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-[#0F2544] focus:border-[#1D4ED8] focus:outline-none focus:ring-2 focus:ring-[#1D4ED8]/20"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full rounded-lg bg-[#0F2544] px-5 py-3 text-sm font-semibold text-white hover:bg-[#193A68] disabled:opacity-60"
-              >
-                {submitting ? 'Claiming Admin Access...' : 'Claim & Activate Admin Console'}
-              </button>
-            </form>
-          </>
-        ) : (
-          <>
-            <h1 className="mt-2 font-display text-2xl font-bold text-[#0F2544]">
-              Administrator Sign In
-            </h1>
-            <p className="mt-1.5 text-sm text-slate-600">
-              Sign in to moderate lost &amp; found submissions, verify ownership claims, and mark items returned.
-            </p>
-            {envConfigured && (
-              <p className="mt-2 text-xs text-slate-500">
-                Server environment passcode protection is active.
-              </p>
-            )}
-
-            {error && (
-              <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
-                {error}
-              </div>
-            )}
-
-            <form onSubmit={handleLogin} className="mt-6 space-y-4">
-              <div>
-                <label htmlFor="admin-user" className="block text-sm font-medium text-[#0F2544]">
-                  Admin Username
-                </label>
-                <input
-                  id="admin-user"
-                  type="text"
-                  required
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-[#0F2544] focus:border-[#1D4ED8] focus:outline-none focus:ring-2 focus:ring-[#1D4ED8]/20"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="admin-pass" className="block text-sm font-medium text-[#0F2544]">
-                  Password / Passcode
-                </label>
-                <input
-                  id="admin-pass"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter administrator password"
-                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-[#0F2544] focus:border-[#1D4ED8] focus:outline-none focus:ring-2 focus:ring-[#1D4ED8]/20"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full rounded-lg bg-[#0F2544] px-5 py-3 text-sm font-semibold text-white hover:bg-[#193A68] disabled:opacity-60"
-              >
-                {submitting ? 'Verifying...' : 'Sign In to Admin Console'}
-              </button>
-            </form>
-          </>
+        {error && (
+          <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
+            {error}
+          </div>
         )}
+
+        <div className="mt-6 space-y-3">
+          <button
+            type="button"
+            disabled={signingIn}
+            onClick={handleAdminSignIn}
+            className="w-full flex items-center justify-center gap-3 rounded-lg bg-[#0F2544] px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#193A68] disabled:opacity-60"
+          >
+            <span>
+              {signingIn
+                ? 'Verifying Administrator...'
+                : firebaseUser
+                  ? `Verify Access (${firebaseUser.email})`
+                  : 'Sign In with Google as Admin'}
+            </span>
+          </button>
+
+          {firebaseUser && (
+            <button
+              type="button"
+              disabled={signingIn}
+              onClick={handleSwitchAccount}
+              className="w-full rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-xs font-semibold text-[#0F2544] hover:bg-slate-50"
+            >
+              Switch Google Account
+            </button>
+          )}
+        </div>
 
         <div className="mt-6 pt-5 border-t border-slate-100 text-center">
           <button

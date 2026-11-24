@@ -6,15 +6,15 @@ export type PageRoute =
   | { name: 'report-lost' }
   | { name: 'report-found' }
   | { name: 'search' }
-  | { name: 'details'; itemId: number }
-  | { name: 'claim'; itemId: number }
+  | { name: 'details'; itemId: string }
+  | { name: 'claim'; itemId: string }
   | { name: 'admin-login' }
   | { name: 'admin-dashboard' }
   | { name: 'admin-items' }
   | { name: 'admin-claims' };
 
 export interface StudentUser {
-  user_id: number;
+  user_id: string;
   student_name: string;
   usn: string;
   email: string;
@@ -23,12 +23,13 @@ export interface StudentUser {
 }
 
 export interface AdminUser {
-  admin_id: number;
+  admin_id: string;
   username: string;
+  email: string;
 }
 
 export interface Category {
-  category_id: number;
+  category_id: string;
   category_name: string;
 }
 
@@ -37,8 +38,9 @@ export type ItemStatus = 'pending' | 'approved' | 'rejected' | 'returned';
 export type ClaimStatus = 'pending' | 'approved' | 'rejected';
 
 export interface ItemRecord {
-  item_id: number;
-  category_id: number;
+  item_id: string;
+  user_id: string;
+  category_id: string;
   category_name: string;
   item_name: string;
   description: string;
@@ -48,43 +50,25 @@ export interface ItemRecord {
   image: string | null;
   status: ItemStatus;
   created_at: string;
-  reporter_name?: string;
-  student_name?: string;
-  usn?: string;
-  email?: string;
-  phone?: string;
-  claim_count?: number;
-  is_owner?: boolean;
-  user_claim?: {
-    claim_id: number;
-    claim_status: ClaimStatus;
-    created_at: string;
-  } | null;
+  reporter_name: string;
 }
 
 export interface ClaimRecord {
-  claim_id: number;
-  item_id: number;
-  user_id: number;
+  claim_id: string;
+  item_id: string;
+  user_id: string;
+  item_name: string;
+  item_location: string;
+  item_report_type: ReportType;
+  category_name: string;
+  claimant_name: string;
+  claimant_usn: string;
+  claimant_email: string;
+  claimant_phone: string;
   claim_description: string;
   supporting_info: string;
   claim_status: ClaimStatus;
   created_at: string;
-  item_name: string;
-  report_type: ReportType;
-  location: string;
-  item_date: string;
-  image: string | null;
-  item_status: ItemStatus;
-  category_name: string;
-  claimant_name?: string;
-  claimant_usn?: string;
-  claimant_email?: string;
-  claimant_phone?: string;
-  reporter_name?: string;
-  reporter_usn?: string;
-  reporter_email?: string;
-  reporter_phone?: string;
 }
 
 export interface PublicStats {

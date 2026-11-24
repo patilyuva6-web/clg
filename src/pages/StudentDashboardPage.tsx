@@ -1,52 +1,103 @@
 import { FilePlus2, LogOut, Search } from 'lucide-react';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
-import { apiFetch, formatDate, safeImageUrl } from '../api';
+import { formatDate, safeImageUrl, timestampToIso } from '../api';
 import { ClaimStatusLabel, ItemStatusLabel, ReportTypeText } from '../components/StatusText';
+import { OperationType, db, handleFirestoreError } from '../firebase';
 import type { ClaimRecord, ItemRecord, PageRoute, StudentUser } from '../types';
 
 interface StudentDashboardPageProps {
   student: StudentUser;
-  token: string;
   onNavigate: (route: PageRoute) => void;
   onLogout: () => void;
 }
 
 export function StudentDashboardPage({
   student,
-  token,
   onNavigate,
   onLogout,
 }: StudentDashboardPageProps) {
   const [reports, setReports] = useState<ItemRecord[]>([]);
   const [claims, setClaims] = useState<ClaimRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
-    async function loadPortal() {
-      try {
-        const [repRes, clmRes] = await Promise.all([
-          apiFetch<{ reports: ItemRecord[] }>('/api/student/reports', { token }),
-          apiFetch<{ claims: ClaimRecord[] }>('/api/student/claims', { token }),
-        ]);
-        if (active) {
-          setReports(repRes.reports);
-          setClaims(clmRes.claims);
-        }
-      } catch (err) {
-        if (active) {
-          setError(err instanceof Error ? err.message : 'Unable to load student portal data.');
-        }
-      } finally {
-        if (active) setLoading(false);
+    const reportsQuery = query(
+      collection(db, 'items'),
+      where('user_id', '==', student.user_id)
+    );
+    const claimsQuery = query(
+      collection(db, 'claims'),
+      where('user_id', '==', student.user_id)
+    );
+
+    const unsubReports = onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const rows: ItemRecord[] = snapshot.docs.map((d) => {
+          const data = d.data();
+          return {
+            item_id: d.id,
+            user_id: String(data.user_id || ''),
+            category_id: String(data.category_id || ''),
+            category_name: String(data.category_name || ''),
+            item_name: String(data.item_name || ''),
+            description: String(data.description || ''),
+            report_type: data.report_type === 'lost' ? 'lost' : 'found',
+            item_date: String(data.item_date || ''),
+            location: String(data.location || ''),
+            image: typeof data.image === 'string' ? data.image : null,
+            status: data.status as ItemRecord['status'],
+            created_at: timestampToIso(data.created_at),
+            reporter_name: String(data.reporter_name || student.student_name),
+          };
+        });
+        rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+        setReports(rows);
+        setLoading(false);
+      },
+      (error) => {
+        setLoading(false);
+        handleFirestoreError(error, OperationType.LIST, 'items');
       }
-    }
-    loadPortal();
+    );
+
+    const unsubClaims = onSnapshot(
+      claimsQuery,
+      (snapshot) => {
+        const rows: ClaimRecord[] = snapshot.docs.map((d) => {
+          const data = d.data();
+          return {
+            claim_id: d.id,
+            item_id: String(data.item_id || ''),
+            user_id: String(data.user_id || ''),
+            item_name: String(data.item_name || ''),
+            item_location: String(data.item_location || ''),
+            item_report_type: data.item_report_type === 'lost' ? 'lost' : 'found',
+            category_name: String(data.category_name || ''),
+            claimant_name: String(data.claimant_name || ''),
+            claimant_usn: String(data.claimant_usn || ''),
+            claimant_email: String(data.claimant_email || ''),
+            claimant_phone: String(data.claimant_phone || ''),
+            claim_description: String(data.claim_description || ''),
+            supporting_info: String(data.supporting_info || ''),
+            claim_status: data.claim_status as ClaimRecord['claim_status'],
+            created_at: timestampToIso(data.created_at),
+          };
+        });
+        rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+        setClaims(rows);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'claims');
+      }
+    );
+
     return () => {
-      active = false;
+      unsubReports();
+      unsubClaims();
     };
-  }, [token]);
+  }, [student.user_id, student.student_name]);
 
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-10">
@@ -60,7 +111,7 @@ export function StudentDashboardPage({
             Welcome, {student.student_name}
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Track moderation status of your lost/found reports and review your submitted ownership claims.
+            Track live moderation status of your lost/found reports and review your submitted ownership claims.
           </p>
         </div>
 
@@ -91,12 +142,6 @@ export function StudentDashboardPage({
           </button>
         </div>
       </div>
-
-      {error && (
-        <div role="alert" className="mt-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
-          {error}
-        </div>
-      )}
 
       {/* Summary Row */}
       <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 border border-slate-200 rounded-xl bg-white divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
@@ -161,41 +206,41 @@ export function StudentDashboardPage({
                 {reports.map((rep) => {
                   const thumb = safeImageUrl(rep.image);
                   return (
-                  <tr key={rep.item_id} className="hover:bg-slate-50/70">
-                    <td className="py-3.5 px-6 font-medium text-[#0F2544]">
-                      <div className="flex items-center gap-3">
-                        {thumb && (
-                          <img
-                            src={thumb}
-                            alt={rep.item_name}
-                            referrerPolicy="no-referrer"
-                            className="h-10 w-14 rounded border border-slate-200 object-cover shrink-0"
-                          />
-                        )}
-                        <span>{rep.item_name}</span>
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4 text-xs">
-                      <ReportTypeText type={rep.report_type} />
-                    </td>
-                    <td className="py-3.5 px-4 text-slate-600">{rep.category_name}</td>
-                    <td className="py-3.5 px-4 text-slate-600 tabular-nums whitespace-nowrap">
-                      {formatDate(rep.item_date)}
-                    </td>
-                    <td className="py-3.5 px-4 text-slate-600 max-w-xs truncate">{rep.location}</td>
-                    <td className="py-3.5 px-4 whitespace-nowrap">
-                      <ItemStatusLabel status={rep.status} />
-                    </td>
-                    <td className="py-3.5 px-6 text-right whitespace-nowrap">
-                      <button
-                        type="button"
-                        onClick={() => onNavigate({ name: 'details', itemId: rep.item_id })}
-                        className="text-xs font-semibold text-[#1D4ED8] hover:underline"
-                      >
-                        View
-                      </button>
-                    </td>
-                  </tr>
+                    <tr key={rep.item_id} className="hover:bg-slate-50/70">
+                      <td className="py-3.5 px-6 font-medium text-[#0F2544]">
+                        <div className="flex items-center gap-3">
+                          {thumb && (
+                            <img
+                              src={thumb}
+                              alt={rep.item_name}
+                              referrerPolicy="no-referrer"
+                              className="h-10 w-14 rounded border border-slate-200 object-cover shrink-0"
+                            />
+                          )}
+                          <span>{rep.item_name}</span>
+                        </div>
+                      </td>
+                      <td className="py-3.5 px-4 text-xs">
+                        <ReportTypeText type={rep.report_type} />
+                      </td>
+                      <td className="py-3.5 px-4 text-slate-600">{rep.category_name}</td>
+                      <td className="py-3.5 px-4 text-slate-600 tabular-nums whitespace-nowrap">
+                        {formatDate(rep.item_date)}
+                      </td>
+                      <td className="py-3.5 px-4 text-slate-600 max-w-xs truncate">{rep.location}</td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <ItemStatusLabel status={rep.status} />
+                      </td>
+                      <td className="py-3.5 px-6 text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => onNavigate({ name: 'details', itemId: rep.item_id })}
+                          className="text-xs font-semibold text-[#1D4ED8] hover:underline"
+                        >
+                          View
+                        </button>
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
@@ -235,7 +280,7 @@ export function StudentDashboardPage({
                 {claims.map((cl) => (
                   <tr key={cl.claim_id} className="hover:bg-slate-50/70">
                     <td className="py-3.5 px-6 font-medium text-[#0F2544]">{cl.item_name}</td>
-                    <td className="py-3.5 px-4 text-slate-600">{cl.location}</td>
+                    <td className="py-3.5 px-4 text-slate-600">{cl.item_location}</td>
                     <td className="py-3.5 px-4 text-slate-600 max-w-sm truncate">{cl.claim_description}</td>
                     <td className="py-3.5 px-4 whitespace-nowrap">
                       <ClaimStatusLabel status={cl.claim_status} />

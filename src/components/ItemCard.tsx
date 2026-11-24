@@ -5,7 +5,7 @@ import { ItemStatusLabel, ReportTypeText } from './StatusText';
 
 interface ItemCardProps {
   item: ItemRecord;
-  onSelect: (itemId: number) => void;
+  onSelect: (itemId: string) => void;
 }
 
 export function ItemCard({ item, onSelect }: ItemCardProps) {

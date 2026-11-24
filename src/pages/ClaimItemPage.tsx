@@ -1,17 +1,18 @@
 import { ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { collection, doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useEffect, useState, type FormEvent } from 'react';
-import { apiFetch, formatDate, safeImageUrl } from '../api';
+import { formatDate, safeImageUrl, timestampToIso } from '../api';
 import { ClaimStatusLabel } from '../components/StatusText';
+import { OperationType, db, handleFirestoreError } from '../firebase';
 import type { ClaimRecord, ItemRecord, PageRoute, StudentUser } from '../types';
 
 interface ClaimItemPageProps {
-  itemId: number;
+  itemId: string;
   student: StudentUser | null;
-  token: string | null;
   onNavigate: (route: PageRoute) => void;
 }
 
-export function ClaimItemPage({ itemId, student, token, onNavigate }: ClaimItemPageProps) {
+export function ClaimItemPage({ itemId, student, onNavigate }: ClaimItemPageProps) {
   const [item, setItem] = useState<ItemRecord | null>(null);
   const [claimDescription, setClaimDescription] = useState('');
   const [supportingInfo, setSupportingInfo] = useState('');
@@ -21,23 +22,40 @@ export function ClaimItemPage({ itemId, student, token, onNavigate }: ClaimItemP
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    let active = true;
-    apiFetch<{ item: ItemRecord }>(`/api/items/${itemId}`, { token })
-      .then((res) => {
-        if (active) setItem(res.item);
-      })
-      .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : 'Unable to load item.');
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [itemId, token]);
+    const unsub = onSnapshot(
+      doc(db, 'items', itemId),
+      (snap) => {
+        if (!snap.exists()) {
+          setItem(null);
+        } else {
+          const data = snap.data();
+          setItem({
+            item_id: snap.id,
+            user_id: String(data.user_id || ''),
+            category_id: String(data.category_id || ''),
+            category_name: String(data.category_name || ''),
+            item_name: String(data.item_name || ''),
+            description: String(data.description || ''),
+            report_type: data.report_type === 'lost' ? 'lost' : 'found',
+            item_date: String(data.item_date || ''),
+            location: String(data.location || ''),
+            image: typeof data.image === 'string' ? data.image : null,
+            status: data.status as ItemRecord['status'],
+            created_at: timestampToIso(data.created_at),
+            reporter_name: String(data.reporter_name || 'Campus Member'),
+          });
+        }
+        setLoading(false);
+      },
+      (err) => {
+        setLoading(false);
+        handleFirestoreError(err, OperationType.GET, `items/${itemId}`);
+      }
+    );
+    return () => unsub();
+  }, [itemId]);
 
-  if (!student || !token) {
+  if (!student) {
     return (
       <div className="mx-auto max-w-xl px-4 sm:px-6 py-14 text-center">
         <div className="bg-white border border-slate-200 rounded-xl p-8">
@@ -59,22 +77,62 @@ export function ClaimItemPage({ itemId, student, token, onNavigate }: ClaimItemP
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!item) return;
     setError(null);
-    setSubmitting(true);
 
+    const reason = claimDescription.trim();
+    const support = supportingInfo.trim();
+
+    if (reason.length < 10 || reason.length > 2000) {
+      setError('Please explain your reason for ownership or recovery (at least 10 characters).');
+      return;
+    }
+
+    setSubmitting(true);
+    const newClaimRef = doc(collection(db, 'claims'));
+    const path = `claims/${newClaimRef.id}`;
     try {
-      const res = await apiFetch<{ claim: ClaimRecord }>('/api/student/claims', {
-        method: 'POST',
-        token,
-        body: {
-          item_id: itemId,
-          claim_description: claimDescription,
-          supporting_info: supportingInfo,
-        },
+      await setDoc(newClaimRef, {
+        item_id: item.item_id,
+        item_name: item.item_name,
+        item_location: item.location,
+        item_report_type: item.report_type,
+        category_name: item.category_name,
+        user_id: student.user_id,
+        claimant_name: student.student_name,
+        claimant_usn: student.usn,
+        claimant_email: student.email,
+        claimant_phone: student.phone,
+        claim_description: reason,
+        supporting_info: support,
+        claim_status: 'pending',
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
       });
-      setSubmittedClaim(res.claim);
+
+      setSubmittedClaim({
+        claim_id: newClaimRef.id,
+        item_id: item.item_id,
+        item_name: item.item_name,
+        item_location: item.location,
+        item_report_type: item.report_type,
+        category_name: item.category_name,
+        user_id: student.user_id,
+        claimant_name: student.student_name,
+        claimant_usn: student.usn,
+        claimant_email: student.email,
+        claimant_phone: student.phone,
+        claim_description: reason,
+        supporting_info: support,
+        claim_status: 'pending',
+        created_at: new Date().toISOString(),
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to submit ownership claim.');
+      try {
+        handleFirestoreError(err, OperationType.CREATE, path);
+      } catch (wrapped) {
+        setError(wrapped instanceof Error ? wrapped.message : 'Unable to submit ownership claim.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -92,7 +150,7 @@ export function ClaimItemPage({ itemId, student, token, onNavigate }: ClaimItemP
     return (
       <div className="mx-auto max-w-xl px-4 sm:px-6 py-12">
         <div className="bg-white border border-slate-200 rounded-xl p-8 text-center">
-          <p className="text-sm text-[#B91C1C]">{error || 'Item not found.'}</p>
+          <p className="text-sm text-[#B91C1C]">Item not found.</p>
           <button
             type="button"
             onClick={() => onNavigate({ name: 'search' })}
@@ -168,12 +226,12 @@ export function ClaimItemPage({ itemId, student, token, onNavigate }: ClaimItemP
               <div className="flex-1">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm font-semibold text-[#0F2544]">
-                    Ownership Claim Submitted (#{submittedClaim.claim_id})
+                    Ownership Claim Submitted to Firebase
                   </p>
                   <ClaimStatusLabel status={submittedClaim.claim_status} />
                 </div>
                 <p className="mt-1.5 text-sm text-slate-600">
-                  Your claim is now queued for administrator verification. You can monitor approval updates inside your Student Portal.
+                  Your claim is now queued for administrator verification. You can monitor live approval updates inside your Student Portal.
                 </p>
                 <div className="mt-4 flex flex-wrap gap-3">
                   <button

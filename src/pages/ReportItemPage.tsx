@@ -1,12 +1,13 @@
 import { CheckCircle2, ImagePlus, Lock } from 'lucide-react';
+import { collection, doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
-import { apiFetch, safeImageUrl } from '../api';
+import { safeImageUrl, uploadItemImage } from '../api';
+import { DEFAULT_CATEGORIES, OperationType, auth, db, handleFirestoreError } from '../firebase';
 import type { Category, ItemRecord, PageRoute, ReportType, StudentUser } from '../types';
 
 interface ReportItemPageProps {
   reportType: ReportType;
   student: StudentUser | null;
-  token: string | null;
   onNavigate: (route: PageRoute) => void;
 }
 
@@ -19,10 +20,10 @@ const CAMPUS_LOCATIONS = [
   'Campus Parking & Gate 2',
 ];
 
-export function ReportItemPage({ reportType, student, token, onNavigate }: ReportItemPageProps) {
-  const [categories, setCategories] = useState<Category[]>([]);
+export function ReportItemPage({ reportType, student, onNavigate }: ReportItemPageProps) {
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
   const [itemName, setItemName] = useState('');
-  const [categoryId, setCategoryId] = useState('');
+  const [categoryId, setCategoryId] = useState(DEFAULT_CATEGORIES[0].category_id);
   const [description, setDescription] = useState('');
   const [itemDate, setItemDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [location, setLocation] = useState('');
@@ -38,15 +39,23 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
   }, [reportType]);
 
   useEffect(() => {
-    apiFetch<{ categories: Category[] }>('/api/categories')
-      .then((res) => {
-        setCategories(res.categories);
-        if (res.categories.length > 0 && !categoryId) {
-          setCategoryId(String(res.categories[0].category_id));
+    const unsub = onSnapshot(
+      collection(db, 'categories'),
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const cats = snapshot.docs.map((d) => ({
+            category_id: d.id,
+            category_name: String(d.data().category_name || ''),
+          }));
+          setCategories(cats);
         }
-      })
-      .catch(() => {});
-  }, [categoryId]);
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.LIST, 'categories');
+      }
+    );
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -78,29 +87,76 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!token) return;
+    if (!student || !auth.currentUser) return;
     setError(null);
-    setSubmitting(true);
 
+    const cleanName = itemName.trim();
+    const cleanDesc = description.trim();
+    const cleanLoc = location.trim();
+
+    if (cleanName.length < 3 || cleanName.length > 140) {
+      setError('Item name must be between 3 and 140 characters.');
+      return;
+    }
+    if (cleanDesc.length < 10 || cleanDesc.length > 2000) {
+      setError('Please provide a clear description (at least 10 characters).');
+      return;
+    }
+    if (cleanLoc.length < 3 || cleanLoc.length > 160) {
+      setError('Please enter the campus location (3–160 characters).');
+      return;
+    }
+
+    setSubmitting(true);
     try {
-      const formData = new FormData();
-      formData.append('item_name', itemName);
-      formData.append('category_id', categoryId);
-      formData.append('description', description);
-      formData.append('report_type', reportType);
-      formData.append('item_date', itemDate);
-      formData.append('location', location);
+      let imageUrl: string | null = null;
       if (file) {
-        formData.append('image', file);
+        const idToken = await auth.currentUser.getIdToken();
+        imageUrl = await uploadItemImage(file, idToken);
       }
 
-      const res = await apiFetch<{ item: ItemRecord }>('/api/student/items', {
-        method: 'POST',
-        formData,
-        token,
-      });
+      const selectedCat =
+        categories.find((c) => c.category_id === categoryId) || DEFAULT_CATEGORIES[0];
+      const newDocRef = doc(collection(db, 'items'));
+      const path = `items/${newDocRef.id}`;
 
-      setSubmittedItem(res.item);
+      const payload = {
+        user_id: student.user_id,
+        reporter_name: student.student_name,
+        category_id: selectedCat.category_id,
+        category_name: selectedCat.category_name,
+        item_name: cleanName,
+        description: cleanDesc,
+        report_type: reportType,
+        item_date: itemDate,
+        location: cleanLoc,
+        image: imageUrl,
+        status: 'pending',
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
+      };
+
+      try {
+        await setDoc(newDocRef, payload);
+      } catch (fsErr) {
+        handleFirestoreError(fsErr, OperationType.CREATE, path);
+      }
+
+      setSubmittedItem({
+        item_id: newDocRef.id,
+        user_id: student.user_id,
+        reporter_name: student.student_name,
+        category_id: selectedCat.category_id,
+        category_name: selectedCat.category_name,
+        item_name: cleanName,
+        description: cleanDesc,
+        report_type: reportType,
+        item_date: itemDate,
+        location: cleanLoc,
+        image: imageUrl,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      });
       setItemName('');
       setDescription('');
       setLocation('');
@@ -116,7 +172,7 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
 
   const isLost = reportType === 'lost';
 
-  if (!student || !token) {
+  if (!student) {
     return (
       <div className="mx-auto max-w-xl px-4 sm:px-6 py-14">
         <div className="bg-white border border-slate-200 rounded-xl p-8 text-center">
@@ -127,7 +183,7 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
             Student Sign-In Required
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-600">
-            To prevent spam and link each report to a verified campus USN, please sign in or register before submitting a {isLost ? 'lost' : 'found'} item report.
+            To prevent spam and link each report to a verified campus USN, please sign in with Google and complete your student profile before submitting a {isLost ? 'lost' : 'found'} item report.
           </p>
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
             <button
@@ -173,7 +229,7 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
               <CheckCircle2 className="h-5 w-5 text-[#15803D] shrink-0 mt-0.5" aria-hidden="true" />
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-[#0F2544]">
-                  Report #{submittedItem.item_id} (“{submittedItem.item_name}”) saved as Pending Review.
+                  Report (“{submittedItem.item_name}”) saved to Firebase as Pending Review.
                 </p>
                 <p className="mt-1 text-sm text-slate-600">
                   You can view it right now in <strong>My Portal</strong> or <strong>Browse Items</strong> while signed in. It becomes visible to everyone else once approved in the Admin Portal.

@@ -1,39 +1,93 @@
 import { ArrowLeft, Calendar, MapPin, PackageSearch, ShieldCheck, Tag } from 'lucide-react';
+import { collection, doc, onSnapshot, query, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
-import { apiFetch, formatDate, safeImageUrl } from '../api';
+import { formatDate, safeImageUrl, timestampToIso } from '../api';
 import { ClaimStatusLabel, ItemStatusLabel, ReportTypeText } from '../components/StatusText';
-import type { ItemRecord, PageRoute, StudentUser } from '../types';
+import { OperationType, db, handleFirestoreError } from '../firebase';
+import type { ClaimStatus, ItemRecord, PageRoute, StudentUser } from '../types';
 
 interface ItemDetailsPageProps {
-  itemId: number;
+  itemId: string;
   student: StudentUser | null;
-  token: string | null;
   onNavigate: (route: PageRoute) => void;
 }
 
-export function ItemDetailsPage({ itemId, student, token, onNavigate }: ItemDetailsPageProps) {
+export function ItemDetailsPage({ itemId, student, onNavigate }: ItemDetailsPageProps) {
   const [item, setItem] = useState<ItemRecord | null>(null);
+  const [userClaim, setUserClaim] = useState<{ claim_id: string; claim_status: ClaimStatus } | null>(
+    null
+  );
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    let active = true;
     setLoading(true);
-    setError(null);
-    apiFetch<{ item: ItemRecord }>(`/api/items/${itemId}`, { token })
-      .then((res) => {
-        if (active) setItem(res.item);
-      })
-      .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : 'Unable to load item details.');
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    setNotFound(false);
+    const itemRef = doc(db, 'items', itemId);
+
+    const unsubItem = onSnapshot(
+      itemRef,
+      (snap) => {
+        if (!snap.exists()) {
+          setItem(null);
+          setNotFound(true);
+          setLoading(false);
+          return;
+        }
+        const data = snap.data();
+        setItem({
+          item_id: snap.id,
+          user_id: String(data.user_id || ''),
+          category_id: String(data.category_id || ''),
+          category_name: String(data.category_name || ''),
+          item_name: String(data.item_name || ''),
+          description: String(data.description || ''),
+          report_type: data.report_type === 'lost' ? 'lost' : 'found',
+          item_date: String(data.item_date || ''),
+          location: String(data.location || ''),
+          image: typeof data.image === 'string' ? data.image : null,
+          status: data.status as ItemRecord['status'],
+          created_at: timestampToIso(data.created_at),
+          reporter_name: String(data.reporter_name || 'Campus Member'),
+        });
+        setLoading(false);
+      },
+      (error) => {
+        setLoading(false);
+        handleFirestoreError(error, OperationType.GET, `items/${itemId}`);
+      }
+    );
+
+    let unsubClaim: (() => void) | undefined;
+    if (student) {
+      const claimsQuery = query(
+        collection(db, 'claims'),
+        where('user_id', '==', student.user_id)
+      );
+      unsubClaim = onSnapshot(
+        claimsQuery,
+        (snapshot) => {
+          const match = snapshot.docs.find((d) => d.data().item_id === itemId);
+          if (match) {
+            setUserClaim({
+              claim_id: match.id,
+              claim_status: match.data().claim_status as ClaimStatus,
+            });
+          } else {
+            setUserClaim(null);
+          }
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'claims')
+      );
+    } else {
+      setUserClaim(null);
+    }
+
     return () => {
-      active = false;
+      unsubItem();
+      if (unsubClaim) unsubClaim();
     };
-  }, [itemId, token]);
+  }, [itemId, student]);
 
   if (loading) {
     return (
@@ -43,12 +97,14 @@ export function ItemDetailsPage({ itemId, student, token, onNavigate }: ItemDeta
     );
   }
 
-  if (error || !item) {
+  if (notFound || !item) {
     return (
       <div className="mx-auto max-w-2xl px-4 sm:px-6 py-14 text-center">
         <div className="bg-white border border-slate-200 rounded-xl p-8">
           <h1 className="font-display text-xl font-bold text-[#0F2544]">Item Unavailable</h1>
-          <p className="mt-2 text-sm text-slate-600">{error || 'This item report could not be found.'}</p>
+          <p className="mt-2 text-sm text-slate-600">
+            This item report could not be found or is awaiting administrator moderation.
+          </p>
           <button
             type="button"
             onClick={() => onNavigate({ name: 'search' })}
@@ -62,7 +118,8 @@ export function ItemDetailsPage({ itemId, student, token, onNavigate }: ItemDeta
   }
 
   const imageSrc = safeImageUrl(item.image);
-  const canClaim = item.status === 'approved' && !item.is_owner && !item.user_claim;
+  const isOwner = Boolean(student && student.user_id === item.user_id);
+  const canClaim = item.status === 'approved' && !isOwner && !userClaim;
 
   return (
     <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8 py-10">
@@ -97,8 +154,6 @@ export function ItemDetailsPage({ itemId, student, token, onNavigate }: ItemDeta
             <div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                 <ReportTypeText type={item.report_type} />
-                <span aria-hidden="true">·</span>
-                <span className="font-mono tabular-nums">Ref #{item.item_id}</span>
                 <span aria-hidden="true">·</span>
                 <ItemStatusLabel status={item.status} />
               </div>
@@ -166,21 +221,20 @@ export function ItemDetailsPage({ itemId, student, token, onNavigate }: ItemDeta
                 </div>
               )}
 
-              {item.is_owner && item.status === 'approved' && (
+              {isOwner && item.status === 'approved' && (
                 <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] px-4 py-3 text-sm text-slate-700">
-                  You submitted this report. Total claims filed:{' '}
-                  <span className="font-semibold tabular-nums">{item.claim_count ?? 0}</span>.
+                  You submitted this report. Any incoming ownership claims will be reviewed by the campus administrator.
                 </div>
               )}
 
-              {item.user_claim && (
+              {userClaim && (
                 <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-4">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-[#0F2544]">Your Submitted Claim</span>
-                    <ClaimStatusLabel status={item.user_claim.claim_status} />
+                    <ClaimStatusLabel status={userClaim.claim_status} />
                   </div>
                   <p className="mt-1.5 text-xs text-slate-600">
-                    Your ownership verification request is recorded. Administrators will contact you via your registered USN profile once reviewed.
+                    Your ownership verification request is recorded. Status updates appear here in real time.
                   </p>
                 </div>
               )}
@@ -202,7 +256,7 @@ export function ItemDetailsPage({ itemId, student, token, onNavigate }: ItemDeta
                   </button>
                   {!student && (
                     <p className="mt-2 text-center text-xs text-slate-500">
-                      You will be asked to sign in with your Student USN before submitting a claim.
+                      You will be asked to sign in with Google and your USN before submitting a claim.
                     </p>
                   )}
                 </div>

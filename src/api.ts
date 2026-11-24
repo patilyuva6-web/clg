@@ -1,36 +1,4 @@
-export async function apiFetch<T>(
-  path: string,
-  options: {
-    method?: string;
-    body?: unknown;
-    formData?: FormData;
-    token?: string | null;
-  } = {}
-): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (options.token) {
-    headers['Authorization'] = `Bearer ${options.token}`;
-  }
-  let body: BodyInit | undefined;
-  if (options.formData) {
-    body = options.formData;
-  } else if (options.body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    body = JSON.stringify(options.body);
-  }
-
-  const response = await fetch(path, {
-    method: options.method || 'GET',
-    headers,
-    body,
-  });
-
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed with status ${response.status}`);
-  }
-  return data;
-}
+import type { Timestamp } from 'firebase/firestore';
 
 export function safeImageUrl(url: string | null | undefined): string | null {
   if (!url) return null;
@@ -38,6 +6,15 @@ export function safeImageUrl(url: string | null | undefined): string | null {
     return url;
   }
   return null;
+}
+
+export function timestampToIso(ts: unknown): string {
+  if (!ts) return new Date().toISOString();
+  if (typeof ts === 'string') return ts;
+  if (typeof ts === 'object' && ts !== null && 'toDate' in ts && typeof (ts as Timestamp).toDate === 'function') {
+    return (ts as Timestamp).toDate().toISOString();
+  }
+  return new Date().toISOString();
 }
 
 export function formatDate(dateStr: string): string {
@@ -49,4 +26,23 @@ export function formatDate(dateStr: string): string {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+export async function uploadItemImage(file: File, firebaseIdToken: string): Promise<string> {
+  const formData = new FormData();
+  formData.append('image', file);
+
+  const response = await fetch('/api/upload', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${firebaseIdToken}`,
+    },
+    body: formData,
+  });
+
+  const data = (await response.json().catch(() => ({}))) as { imageUrl?: string; error?: string };
+  if (!response.ok || !data.imageUrl) {
+    throw new Error(data.error || 'Unable to upload photograph.');
+  }
+  return data.imageUrl;
 }

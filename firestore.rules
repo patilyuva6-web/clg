@@ -1,0 +1,236 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==========================
+    // Global Hardened Primitives
+    // ==========================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'patilyuva6@gmail.com'
+      );
+    }
+
+    // ==========================
+    // Entity Validation Helpers
+    // ==========================
+    function isValidUser(data) {
+      return data.keys().hasAll(['student_name', 'usn', 'email', 'phone', 'created_at'])
+        && data.keys().hasOnly(['student_name', 'usn', 'email', 'phone', 'created_at'])
+        && data.student_name is string && data.student_name.size() >= 2 && data.student_name.size() <= 100
+        && data.usn is string && data.usn.size() >= 2 && data.usn.size() <= 32
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 22
+        && data.created_at is timestamp;
+    }
+
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['username', 'email', 'created_at'])
+        && data.keys().hasOnly(['username', 'email', 'created_at'])
+        && data.username is string && data.username.size() >= 2 && data.username.size() <= 80
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.created_at is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['category_name'])
+        && data.keys().hasOnly(['category_name'])
+        && data.category_name is string && data.category_name.size() >= 2 && data.category_name.size() <= 80;
+    }
+
+    function isValidItem(data) {
+      return data.keys().hasAll([
+          'user_id', 'reporter_name', 'category_id', 'category_name',
+          'item_name', 'description', 'report_type', 'item_date',
+          'location', 'status', 'created_at', 'updated_at'
+        ])
+        && data.keys().hasOnly([
+          'user_id', 'reporter_name', 'category_id', 'category_name',
+          'item_name', 'description', 'report_type', 'item_date',
+          'location', 'image', 'status', 'created_at', 'updated_at'
+        ])
+        && data.user_id is string && data.user_id.size() >= 1 && data.user_id.size() <= 128
+        && data.reporter_name is string && data.reporter_name.size() >= 2 && data.reporter_name.size() <= 100
+        && data.category_id is string && data.category_id.size() >= 1 && data.category_id.size() <= 64
+        && data.category_name is string && data.category_name.size() >= 2 && data.category_name.size() <= 80
+        && data.item_name is string && data.item_name.size() >= 3 && data.item_name.size() <= 140
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 2000
+        && data.report_type in ['lost', 'found']
+        && data.item_date is string && data.item_date.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.location is string && data.location.size() >= 3 && data.location.size() <= 160
+        && (!('image' in data) || data.image == null || (data.image is string && data.image.size() <= 300))
+        && data.status in ['pending', 'approved', 'rejected', 'returned']
+        && data.created_at is timestamp
+        && data.updated_at is timestamp;
+    }
+
+    function isValidClaim(data) {
+      return data.keys().hasAll([
+          'item_id', 'item_name', 'item_location', 'item_report_type', 'category_name',
+          'user_id', 'claimant_name', 'claimant_usn', 'claimant_email', 'claimant_phone',
+          'claim_description', 'supporting_info', 'claim_status', 'created_at', 'updated_at'
+        ])
+        && data.keys().hasOnly([
+          'item_id', 'item_name', 'item_location', 'item_report_type', 'category_name',
+          'user_id', 'claimant_name', 'claimant_usn', 'claimant_email', 'claimant_phone',
+          'claim_description', 'supporting_info', 'claim_status', 'created_at', 'updated_at'
+        ])
+        && data.item_id is string && isValidId(data.item_id)
+        && data.item_name is string && data.item_name.size() >= 3 && data.item_name.size() <= 140
+        && data.item_location is string && data.item_location.size() >= 3 && data.item_location.size() <= 160
+        && data.item_report_type in ['lost', 'found']
+        && data.category_name is string && data.category_name.size() >= 2 && data.category_name.size() <= 80
+        && data.user_id is string && data.user_id.size() >= 1 && data.user_id.size() <= 128
+        && data.claimant_name is string && data.claimant_name.size() >= 2 && data.claimant_name.size() <= 100
+        && data.claimant_usn is string && data.claimant_usn.size() >= 2 && data.claimant_usn.size() <= 32
+        && data.claimant_email is string && data.claimant_email.size() >= 5 && data.claimant_email.size() <= 160
+        && data.claimant_phone is string && data.claimant_phone.size() >= 7 && data.claimant_phone.size() <= 22
+        && data.claim_description is string && data.claim_description.size() >= 10 && data.claim_description.size() <= 2000
+        && data.supporting_info is string && data.supporting_info.size() <= 2000
+        && data.claim_status in ['pending', 'approved', 'rejected']
+        && data.created_at is timestamp
+        && data.updated_at is timestamp;
+    }
+
+    // ==========================
+    // Collection Rules
+    // ==========================
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidUser(incoming())
+        && incoming().email == request.auth.token.email
+        && incoming().created_at == request.time;
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && (isOwner(userId) || isAdmin())
+        && isValidUser(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['student_name', 'usn', 'phone'])
+        && incoming().email == existing().email
+        && incoming().created_at == existing().created_at;
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(adminId)
+        && isAdmin()
+        && isValidAdmin(incoming())
+        && incoming().created_at == request.time;
+      allow update: if isValidId(adminId)
+        && isAdmin()
+        && isValidAdmin(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['username', 'email'])
+        && incoming().created_at == existing().created_at;
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId);
+      allow list: if true;
+      allow create: if isValidId(categoryId) && isAdmin() && isValidCategory(incoming());
+      allow update: if isValidId(categoryId) && isAdmin() && isValidCategory(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['category_name']);
+      allow delete: if isValidId(categoryId) && isAdmin();
+    }
+
+    match /items/{itemId} {
+      allow get: if isValidId(itemId) && (
+        existing().status in ['approved', 'returned']
+        || (isSignedIn() && existing().user_id == request.auth.uid)
+        || isAdmin()
+      );
+      allow list: if (
+        existing().status in ['approved', 'returned']
+        || (isSignedIn() && existing().user_id == request.auth.uid)
+        || isAdmin()
+      );
+      allow create: if isValidId(itemId)
+        && isVerifiedUser()
+        && isValidItem(incoming())
+        && (
+          (incoming().user_id == request.auth.uid && incoming().status == 'pending')
+          || isAdmin()
+        )
+        && incoming().created_at == request.time
+        && incoming().updated_at == request.time;
+      allow update: if isValidId(itemId)
+        && isValidItem(incoming())
+        && isAdmin()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'item_name', 'category_id', 'category_name', 'description',
+          'report_type', 'item_date', 'location', 'status', 'updated_at'
+        ])
+        && incoming().user_id == existing().user_id
+        && incoming().created_at == existing().created_at
+        && incoming().updated_at == request.time;
+      allow delete: if isValidId(itemId) && isAdmin();
+    }
+
+    match /claims/{claimId} {
+      allow get: if isValidId(claimId) && (
+        (isSignedIn() && existing().user_id == request.auth.uid)
+        || isAdmin()
+      );
+      allow list: if (
+        (isSignedIn() && existing().user_id == request.auth.uid)
+        || isAdmin()
+      );
+      allow create: if isValidId(claimId)
+        && isVerifiedUser()
+        && isValidClaim(incoming())
+        && incoming().user_id == request.auth.uid
+        && incoming().claimant_email == request.auth.token.email
+        && incoming().claim_status == 'pending'
+        && incoming().created_at == request.time
+        && incoming().updated_at == request.time
+        && exists(/databases/$(database)/documents/items/$(incoming().item_id))
+        && get(/databases/$(database)/documents/items/$(incoming().item_id)).data.status == 'approved'
+        && get(/databases/$(database)/documents/items/$(incoming().item_id)).data.user_id != request.auth.uid;
+      allow update: if isValidId(claimId)
+        && isValidClaim(incoming())
+        && isAdmin()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['claim_status', 'updated_at'])
+        && incoming().user_id == existing().user_id
+        && incoming().item_id == existing().item_id
+        && incoming().created_at == existing().created_at
+        && incoming().updated_at == request.time;
+      allow delete: if isValidId(claimId) && isAdmin();
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import {
   Check,
   ClipboardList,
+  Database,
   Edit3,
   LayoutDashboard,
   LogOut,
@@ -10,9 +11,24 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { apiFetch, formatDate, safeImageUrl } from '../api';
+import {
+  collection,
+  doc,
+  onSnapshot,
+  serverTimestamp,
+  updateDoc,
+  writeBatch,
+} from 'firebase/firestore';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { formatDate, safeImageUrl, timestampToIso } from '../api';
 import { ClaimStatusLabel, ItemStatusLabel, ReportTypeText } from '../components/StatusText';
+import {
+  DEFAULT_CATEGORIES,
+  OperationType,
+  db,
+  handleFirestoreError,
+  seedCampusDefaultsIfNeeded,
+} from '../firebase';
 import type {
   AdminDashboardStats,
   AdminUser,
@@ -22,12 +38,12 @@ import type {
   ItemStatus,
   PageRoute,
   ReportType,
+  StudentUser,
 } from '../types';
 
 interface AdminPortalPageProps {
   activeTab: 'admin-dashboard' | 'admin-items' | 'admin-claims';
   admin: AdminUser;
-  token: string;
   onNavigate: (route: PageRoute) => void;
   onLogout: () => void;
 }
@@ -35,15 +51,13 @@ interface AdminPortalPageProps {
 export function AdminPortalPage({
   activeTab,
   admin,
-  token,
   onNavigate,
   onLogout,
 }: AdminPortalPageProps) {
-  const [stats, setStats] = useState<AdminDashboardStats | null>(null);
-  const [recentReports, setRecentReports] = useState<ItemRecord[]>([]);
+  const [users, setUsers] = useState<StudentUser[]>([]);
   const [items, setItems] = useState<ItemRecord[]>([]);
   const [claims, setClaims] = useState<ClaimRecord[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
 
   const [itemStatusFilter, setItemStatusFilter] = useState('');
   const [itemTypeFilter, setItemTypeFilter] = useState('');
@@ -51,6 +65,7 @@ export function AdminPortalPage({
   const [claimStatusFilter, setClaimStatusFilter] = useState('');
 
   const [loading, setLoading] = useState(true);
+  const [seeding, setSeeding] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,76 +78,262 @@ export function AdminPortalPage({
   const [editLoc, setEditLoc] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editStatus, setEditStatus] = useState<ItemStatus>('pending');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   // Delete Confirmation Modal State
   const [deletingItem, setDeletingItem] = useState<ItemRecord | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
 
+  // Auto-seed default categories & sample items once when Firestore is empty
   useEffect(() => {
-    apiFetch<{ categories: Category[] }>('/api/categories')
-      .then((res) => setCategories(res.categories))
-      .catch(() => {});
+    let active = true;
+    seedCampusDefaultsIfNeeded(admin.admin_id)
+      .then((seeded) => {
+        if (seeded && active) {
+          setBanner('Initialized Firestore with default campus categories and sample lost/found reports.');
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setError(err instanceof Error ? err.message : 'Unable to initialize default Firestore records.');
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [admin.admin_id]);
+
+  // Real-time Firestore listeners for categories, users, items, and claims
+  useEffect(() => {
+    setLoading(true);
+    let usersLoaded = false;
+    let itemsLoaded = false;
+    let claimsLoaded = false;
+
+    const markLoaded = () => {
+      if (usersLoaded && itemsLoaded && claimsLoaded) {
+        setLoading(false);
+      }
+    };
+
+    const unsubCats = onSnapshot(
+      collection(db, 'categories'),
+      (snapshot) => {
+        if (!snapshot.empty) {
+          setCategories(
+            snapshot.docs.map((d) => ({
+              category_id: d.id,
+              category_name: String(d.data().category_name || ''),
+            }))
+          );
+        }
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'categories')
+    );
+
+    const unsubUsers = onSnapshot(
+      collection(db, 'users'),
+      (snapshot) => {
+        setUsers(
+          snapshot.docs.map((d) => {
+            const data = d.data();
+            return {
+              user_id: d.id,
+              student_name: String(data.student_name || ''),
+              usn: String(data.usn || ''),
+              email: String(data.email || ''),
+              phone: String(data.phone || ''),
+              created_at: timestampToIso(data.created_at),
+            };
+          })
+        );
+        usersLoaded = true;
+        markLoaded();
+      },
+      (err) => {
+        usersLoaded = true;
+        markLoaded();
+        handleFirestoreError(err, OperationType.LIST, 'users');
+      }
+    );
+
+    const unsubItems = onSnapshot(
+      collection(db, 'items'),
+      (snapshot) => {
+        const rows: ItemRecord[] = snapshot.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              item_id: d.id,
+              user_id: String(data.user_id || ''),
+              category_id: String(data.category_id || ''),
+              category_name: String(data.category_name || ''),
+              item_name: String(data.item_name || ''),
+              description: String(data.description || ''),
+              report_type: (data.report_type === 'lost' ? 'lost' : 'found') as ReportType,
+              item_date: String(data.item_date || ''),
+              location: String(data.location || ''),
+              image: typeof data.image === 'string' ? data.image : null,
+              status: data.status as ItemStatus,
+              created_at: timestampToIso(data.created_at),
+              reporter_name: String(data.reporter_name || 'Campus Member'),
+            };
+          })
+          .sort((a, b) => b.created_at.localeCompare(a.created_at));
+        setItems(rows);
+        itemsLoaded = true;
+        markLoaded();
+      },
+      (err) => {
+        itemsLoaded = true;
+        markLoaded();
+        handleFirestoreError(err, OperationType.LIST, 'items');
+      }
+    );
+
+    const unsubClaims = onSnapshot(
+      collection(db, 'claims'),
+      (snapshot) => {
+        const rows: ClaimRecord[] = snapshot.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              claim_id: d.id,
+              item_id: String(data.item_id || ''),
+              user_id: String(data.user_id || ''),
+              item_name: String(data.item_name || ''),
+              item_location: String(data.item_location || ''),
+              item_report_type: (data.item_report_type === 'lost' ? 'lost' : 'found') as ReportType,
+              category_name: String(data.category_name || ''),
+              claimant_name: String(data.claimant_name || ''),
+              claimant_usn: String(data.claimant_usn || ''),
+              claimant_email: String(data.claimant_email || ''),
+              claimant_phone: String(data.claimant_phone || ''),
+              claim_description: String(data.claim_description || ''),
+              supporting_info: String(data.supporting_info || ''),
+              claim_status: data.claim_status as ClaimRecord['claim_status'],
+              created_at: timestampToIso(data.created_at),
+            };
+          })
+          .sort((a, b) => b.created_at.localeCompare(a.created_at));
+        setClaims(rows);
+        claimsLoaded = true;
+        markLoaded();
+      },
+      (err) => {
+        claimsLoaded = true;
+        markLoaded();
+        handleFirestoreError(err, OperationType.LIST, 'claims');
+      }
+    );
+
+    return () => {
+      unsubCats();
+      unsubUsers();
+      unsubItems();
+      unsubClaims();
+    };
   }, []);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      if (activeTab === 'admin-dashboard') {
-        const res = await apiFetch<{ stats: AdminDashboardStats; recent_reports: ItemRecord[] }>(
-          '/api/admin/dashboard',
-          { token }
-        );
-        setStats(res.stats);
-        setRecentReports(res.recent_reports);
-      } else if (activeTab === 'admin-items') {
-        const params = new URLSearchParams();
-        if (itemStatusFilter) params.set('status', itemStatusFilter);
-        if (itemTypeFilter) params.set('report_type', itemTypeFilter);
-        if (itemSearch.trim()) params.set('q', itemSearch.trim());
-        const res = await apiFetch<{ items: ItemRecord[] }>(`/api/admin/items?${params.toString()}`, {
-          token,
-        });
-        setItems(res.items);
-      } else {
-        const params = new URLSearchParams();
-        if (claimStatusFilter) params.set('status', claimStatusFilter);
-        const res = await apiFetch<{ claims: ClaimRecord[] }>(
-          `/api/admin/claims?${params.toString()}`,
-          { token }
-        );
-        setClaims(res.claims);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to load administrator data.');
-    } finally {
-      setLoading(false);
+  const usersMap = useMemo(() => {
+    const map = new Map<string, StudentUser>();
+    for (const u of users) {
+      map.set(u.user_id, u);
     }
-  }, [activeTab, token, itemStatusFilter, itemTypeFilter, itemSearch, claimStatusFilter]);
+    return map;
+  }, [users]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  const itemsMap = useMemo(() => {
+    const map = new Map<string, ItemRecord>();
+    for (const item of items) {
+      map.set(item.item_id, item);
+    }
+    return map;
+  }, [items]);
 
-  const updateItemStatus = async (itemId: number, status: ItemStatus) => {
+  const stats: AdminDashboardStats = useMemo(() => {
+    return {
+      total_users: users.length,
+      total_lost: items.filter((i) => i.report_type === 'lost').length,
+      total_found: items.filter((i) => i.report_type === 'found').length,
+      pending_reports: items.filter((i) => i.status === 'pending').length,
+      approved_reports: items.filter((i) => i.status === 'approved').length,
+      returned_items: items.filter((i) => i.status === 'returned').length,
+      pending_claims: claims.filter((c) => c.claim_status === 'pending').length,
+    };
+  }, [users, items, claims]);
+
+  const recentReports = useMemo(() => items.slice(0, 8), [items]);
+
+  const filteredItems = useMemo(() => {
+    const q = itemSearch.trim().toLowerCase();
+    return items.filter((item) => {
+      if (itemStatusFilter && item.status !== itemStatusFilter) return false;
+      if (itemTypeFilter && item.report_type !== itemTypeFilter) return false;
+      if (q) {
+        const reporter = usersMap.get(item.user_id);
+        const hay = [
+          item.item_name,
+          item.location,
+          item.category_name,
+          item.reporter_name,
+          reporter?.usn || '',
+          reporter?.email || '',
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [items, itemStatusFilter, itemTypeFilter, itemSearch, usersMap]);
+
+  const filteredClaims = useMemo(() => {
+    if (!claimStatusFilter) return claims;
+    return claims.filter((c) => c.claim_status === claimStatusFilter);
+  }, [claims, claimStatusFilter]);
+
+  const handleLoadSamples = async () => {
     setError(null);
     setBanner(null);
+    setSeeding(true);
     try {
-      await apiFetch(`/api/admin/items/${itemId}`, {
-        method: 'PATCH',
-        token,
-        body: { status },
-      });
-      setBanner(`Report #${itemId} updated to "${status}".`);
-      await loadData();
+      const seeded = await seedCampusDefaultsIfNeeded(admin.admin_id);
+      if (seeded) {
+        setBanner('Sample campus reports and categories loaded into Firestore.');
+      } else {
+        setBanner('Firestore already contains active categories and item reports.');
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update item status.');
+      setError(err instanceof Error ? err.message : 'Unable to seed sample reports.');
+    } finally {
+      setSeeding(false);
+    }
+  };
+
+  const updateItemStatus = async (itemId: string, status: ItemStatus) => {
+    setError(null);
+    setBanner(null);
+    const path = `items/${itemId}`;
+    try {
+      await updateDoc(doc(db, 'items', itemId), {
+        status,
+        updated_at: serverTimestamp(),
+      });
+      setBanner(`Report "${itemsMap.get(itemId)?.item_name || itemId}" updated to "${status}".`);
+    } catch (err) {
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch (wrapped) {
+        setError(wrapped instanceof Error ? wrapped.message : 'Failed to update item status.');
+      }
     }
   };
 
   const openEditModal = (item: ItemRecord) => {
     setEditingItem(item);
     setEditName(item.item_name);
-    setEditCatId(String(item.category_id));
+    setEditCatId(item.category_id || categories[0]?.category_id || 'other');
     setEditType(item.report_type);
     setEditDate(item.item_date);
     setEditLoc(item.location);
@@ -145,25 +346,52 @@ export function AdminPortalPage({
     if (!editingItem) return;
     setError(null);
     setBanner(null);
+
+    const cleanName = editName.trim();
+    const cleanLoc = editLoc.trim();
+    const cleanDesc = editDesc.trim();
+    if (cleanName.length < 3 || cleanName.length > 140) {
+      setError('Item name must be between 3 and 140 characters.');
+      return;
+    }
+    if (cleanLoc.length < 3 || cleanLoc.length > 160) {
+      setError('Location must be between 3 and 160 characters.');
+      return;
+    }
+    if (cleanDesc.length < 10 || cleanDesc.length > 2000) {
+      setError('Description must be between 10 and 2000 characters.');
+      return;
+    }
+
+    const chosenCat =
+      categories.find((c) => c.category_id === editCatId) ||
+      DEFAULT_CATEGORIES.find((c) => c.category_id === editCatId) ||
+      categories[0];
+
+    setSavingEdit(true);
+    const path = `items/${editingItem.item_id}`;
     try {
-      await apiFetch(`/api/admin/items/${editingItem.item_id}`, {
-        method: 'PATCH',
-        token,
-        body: {
-          item_name: editName,
-          category_id: Number(editCatId),
-          report_type: editType,
-          item_date: editDate,
-          location: editLoc,
-          description: editDesc,
-          status: editStatus,
-        },
+      await updateDoc(doc(db, 'items', editingItem.item_id), {
+        item_name: cleanName,
+        category_id: chosenCat.category_id,
+        category_name: chosenCat.category_name,
+        description: cleanDesc,
+        report_type: editType,
+        item_date: editDate,
+        location: cleanLoc,
+        status: editStatus,
+        updated_at: serverTimestamp(),
       });
-      setBanner(`Report #${editingItem.item_id} details updated.`);
+      setBanner(`Report "${cleanName}" details updated.`);
       setEditingItem(null);
-      await loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to save report edits.');
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch (wrapped) {
+        setError(wrapped instanceof Error ? wrapped.message : 'Unable to save report edits.');
+      }
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -171,42 +399,95 @@ export function AdminPortalPage({
     if (!deletingItem) return;
     setError(null);
     setBanner(null);
+    setDeletingBusy(true);
+    const path = `items/${deletingItem.item_id}`;
     try {
-      await apiFetch(`/api/admin/items/${deletingItem.item_id}`, {
-        method: 'DELETE',
-        token,
-      });
-      setBanner(`Report #${deletingItem.item_id} permanently deleted.`);
+      const batch = writeBatch(db);
+      batch.delete(doc(db, 'items', deletingItem.item_id));
+      for (const cl of claims) {
+        if (cl.item_id === deletingItem.item_id) {
+          batch.delete(doc(db, 'claims', cl.claim_id));
+        }
+      }
+      await batch.commit();
+      setBanner(`Report "${deletingItem.item_name}" permanently deleted.`);
       setDeletingItem(null);
-      await loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to delete report.');
+      try {
+        handleFirestoreError(err, OperationType.DELETE, path);
+      } catch (wrapped) {
+        setError(wrapped instanceof Error ? wrapped.message : 'Unable to delete report.');
+      }
+    } finally {
+      setDeletingBusy(false);
     }
   };
 
-  const handleClaimAction = async (claimId: number, action: 'approve' | 'reject' | 'mark_returned') => {
+  const handleClaimAction = async (
+    claim: ClaimRecord,
+    action: 'approve' | 'reject' | 'mark_returned'
+  ) => {
     setError(null);
     setBanner(null);
+    const path = `claims/${claim.claim_id}`;
     try {
-      await apiFetch(`/api/admin/claims/${claimId}`, {
-        method: 'PATCH',
-        token,
-        body: { action },
-      });
+      const batch = writeBatch(db);
+      const now = serverTimestamp();
+
+      if (action === 'reject') {
+        batch.update(doc(db, 'claims', claim.claim_id), {
+          claim_status: 'rejected',
+          updated_at: now,
+        });
+      } else {
+        // Approve selected claim and reject competing pending claims for the same item
+        batch.update(doc(db, 'claims', claim.claim_id), {
+          claim_status: 'approved',
+          updated_at: now,
+        });
+        for (const other of claims) {
+          if (
+            other.item_id === claim.item_id &&
+            other.claim_id !== claim.claim_id &&
+            other.claim_status === 'pending'
+          ) {
+            batch.update(doc(db, 'claims', other.claim_id), {
+              claim_status: 'rejected',
+              updated_at: now,
+            });
+          }
+        }
+        if (action === 'mark_returned') {
+          batch.update(doc(db, 'items', claim.item_id), {
+            status: 'returned',
+            updated_at: now,
+          });
+        }
+      }
+
+      await batch.commit();
+
       const label =
         action === 'approve'
           ? 'approved'
           : action === 'reject'
             ? 'rejected'
             : 'approved and item marked as returned';
-      setBanner(`Claim #${claimId} ${label}.`);
-      await loadData();
+      setBanner(`Claim by ${claim.claimant_name} for "${claim.item_name}" ${label}.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to process claim.');
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch (wrapped) {
+        setError(wrapped instanceof Error ? wrapped.message : 'Unable to process claim.');
+      }
     }
   };
 
-  const navItems: { id: 'admin-dashboard' | 'admin-items' | 'admin-claims'; label: string; icon: typeof LayoutDashboard }[] = [
+  const navItems: {
+    id: 'admin-dashboard' | 'admin-items' | 'admin-claims';
+    label: string;
+    icon: typeof LayoutDashboard;
+  }[] = [
     { id: 'admin-dashboard', label: 'Dashboard Overview', icon: LayoutDashboard },
     { id: 'admin-items', label: 'Item Reports', icon: ClipboardList },
     { id: 'admin-claims', label: 'Ownership Claims', icon: ShieldCheck },
@@ -219,6 +500,7 @@ export function AdminPortalPage({
         <div className="p-6 border-b border-[#1B3761]">
           <p className="text-xs font-medium text-slate-400">Administrator Console</p>
           <p className="mt-1 font-display text-base font-bold text-white truncate">{admin.username}</p>
+          <p className="mt-0.5 text-xs text-slate-400 truncate">{admin.email}</p>
         </div>
 
         <nav aria-label="Admin navigation" className="p-3 flex lg:flex-col gap-1 overflow-x-auto">
@@ -276,14 +558,27 @@ export function AdminPortalPage({
             </h1>
           </div>
 
-          <button
-            type="button"
-            onClick={onLogout}
-            className="lg:hidden inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-[#0F2544]"
-          >
-            <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Sign Out</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {items.length === 0 && !loading && (
+              <button
+                type="button"
+                disabled={seeding}
+                onClick={handleLoadSamples}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-[#0F2544] hover:bg-slate-50 disabled:opacity-60"
+              >
+                <Database className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>{seeding ? 'Seeding...' : 'Load Sample Items'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onLogout}
+              className="lg:hidden inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-[#0F2544]"
+            >
+              <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Sign Out</span>
+            </button>
+          </div>
         </div>
 
         {banner && (
@@ -301,7 +596,10 @@ export function AdminPortalPage({
         )}
 
         {error && (
-          <div role="alert" className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
+          <div
+            role="alert"
+            className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]"
+          >
             {error}
           </div>
         )}
@@ -313,37 +611,37 @@ export function AdminPortalPage({
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <p className="text-xs text-slate-500">Registered Users</p>
                 <p className="mt-1.5 font-display text-2xl font-bold text-[#0F2544] tabular-nums">
-                  {stats ? stats.total_users : '—'}
+                  {loading ? '—' : stats.total_users}
                 </p>
               </div>
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <p className="text-xs text-slate-500">Total Lost Reports</p>
                 <p className="mt-1.5 font-display text-2xl font-bold text-[#B91C1C] tabular-nums">
-                  {stats ? stats.total_lost : '—'}
+                  {loading ? '—' : stats.total_lost}
                 </p>
               </div>
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <p className="text-xs text-slate-500">Total Found Reports</p>
                 <p className="mt-1.5 font-display text-2xl font-bold text-[#1D4ED8] tabular-nums">
-                  {stats ? stats.total_found : '—'}
+                  {loading ? '—' : stats.total_found}
                 </p>
               </div>
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <p className="text-xs text-slate-500">Pending Reports</p>
                 <p className="mt-1.5 font-display text-2xl font-bold text-[#B45309] tabular-nums">
-                  {stats ? stats.pending_reports : '—'}
+                  {loading ? '—' : stats.pending_reports}
                 </p>
               </div>
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <p className="text-xs text-slate-500">Approved Reports</p>
                 <p className="mt-1.5 font-display text-2xl font-bold text-[#15803D] tabular-nums">
-                  {stats ? stats.approved_reports : '—'}
+                  {loading ? '—' : stats.approved_reports}
                 </p>
               </div>
               <div className="bg-white border border-slate-200 rounded-xl p-4">
                 <p className="text-xs text-slate-500">Pending Claims</p>
                 <p className="mt-1.5 font-display text-2xl font-bold text-[#B45309] tabular-nums">
-                  {stats ? stats.pending_claims : '—'}
+                  {loading ? '—' : stats.pending_claims}
                 </p>
               </div>
             </div>
@@ -351,7 +649,7 @@ export function AdminPortalPage({
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
                 <h2 className="font-display text-base font-bold text-[#0F2544]">
-                  Recently Submitted Reports
+                  Recently Submitted Reports (Real-Time)
                 </h2>
                 <button
                   type="button"
@@ -363,13 +661,15 @@ export function AdminPortalPage({
               </div>
 
               {loading ? (
-                <div className="p-6 text-sm text-slate-500">Loading dashboard metrics...</div>
+                <div className="p-6 text-sm text-slate-500">Syncing live Firestore metrics...</div>
+              ) : recentReports.length === 0 ? (
+                <div className="p-6 text-sm text-slate-500">No item reports recorded yet.</div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="border-b border-slate-200 bg-[#F8FAFC] text-xs font-semibold text-slate-500">
-                        <th className="py-3 px-6">ID</th>
+                        <th className="py-3 px-6">Report ID</th>
                         <th className="py-3 px-4">Item Name</th>
                         <th className="py-3 px-4">Type</th>
                         <th className="py-3 px-4">Reporter</th>
@@ -379,55 +679,62 @@ export function AdminPortalPage({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-sm">
-                      {recentReports.map((rep) => (
-                        <tr key={rep.item_id} className="hover:bg-slate-50/70">
-                          <td className="py-3 px-6 font-mono text-xs text-slate-500 tabular-nums">
-                            #{rep.item_id}
-                          </td>
-                          <td className="py-3 px-4 font-medium text-[#0F2544]">{rep.item_name}</td>
-                          <td className="py-3 px-4 text-xs">
-                            <ReportTypeText type={rep.report_type} />
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            {rep.student_name}{' '}
-                            <span className="font-mono text-xs text-slate-400">({rep.usn})</span>
-                          </td>
-                          <td className="py-3 px-4 text-slate-600 tabular-nums whitespace-nowrap">
-                            {formatDate(rep.item_date)}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            <ItemStatusLabel status={rep.status} />
-                          </td>
-                          <td className="py-3 px-6 text-right whitespace-nowrap space-x-2">
-                            {rep.status === 'pending' ? (
-                              <>
+                      {recentReports.map((rep) => {
+                        const reporter = usersMap.get(rep.user_id);
+                        return (
+                          <tr key={rep.item_id} className="hover:bg-slate-50/70">
+                            <td className="py-3 px-6 font-mono text-xs text-slate-500 tabular-nums">
+                              {rep.item_id.slice(0, 8)}
+                            </td>
+                            <td className="py-3 px-4 font-medium text-[#0F2544]">{rep.item_name}</td>
+                            <td className="py-3 px-4 text-xs">
+                              <ReportTypeText type={rep.report_type} />
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">
+                              {rep.reporter_name}
+                              {reporter?.usn && (
+                                <span className="ml-1 font-mono text-xs text-slate-400">
+                                  ({reporter.usn})
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 tabular-nums whitespace-nowrap">
+                              {formatDate(rep.item_date)}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <ItemStatusLabel status={rep.status} />
+                            </td>
+                            <td className="py-3 px-6 text-right whitespace-nowrap space-x-2">
+                              {rep.status === 'pending' ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => updateItemStatus(rep.item_id, 'approved')}
+                                    className="rounded-md bg-[#15803D] px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-700"
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => updateItemStatus(rep.item_id, 'rejected')}
+                                    className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-[#B91C1C] hover:bg-red-100"
+                                  >
+                                    Reject
+                                  </button>
+                                </>
+                              ) : (
                                 <button
                                   type="button"
-                                  onClick={() => updateItemStatus(rep.item_id, 'approved')}
-                                  className="rounded-md bg-[#15803D] px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-700"
+                                  onClick={() => onNavigate({ name: 'admin-items' })}
+                                  className="text-xs font-semibold text-[#1D4ED8] hover:underline"
                                 >
-                                  Approve
+                                  Manage
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() => updateItemStatus(rep.item_id, 'rejected')}
-                                  className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-[#B91C1C] hover:bg-red-100"
-                                >
-                                  Reject
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => onNavigate({ name: 'admin-items' })}
-                                className="text-xs font-semibold text-[#1D4ED8] hover:underline"
-                              >
-                                Manage
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -484,7 +791,7 @@ export function AdminPortalPage({
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
               {loading ? (
                 <div className="p-6 text-sm text-slate-500">Loading reports...</div>
-              ) : items.length === 0 ? (
+              ) : filteredItems.length === 0 ? (
                 <div className="p-10 text-center text-sm text-slate-500">
                   No reports match the current filters.
                 </div>
@@ -502,8 +809,9 @@ export function AdminPortalPage({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-sm">
-                      {items.map((item) => {
+                      {filteredItems.map((item) => {
                         const imgSrc = safeImageUrl(item.image);
+                        const reporter = usersMap.get(item.user_id);
                         return (
                           <tr key={item.item_id} className="hover:bg-slate-50/70 align-top">
                             <td className="py-4 px-5">
@@ -519,7 +827,7 @@ export function AdminPortalPage({
                                 <div>
                                   <p className="font-semibold text-[#0F2544]">{item.item_name}</p>
                                   <p className="text-xs text-slate-500">
-                                    #{item.item_id} · {item.category_name}
+                                    {item.item_id.slice(0, 8)} · {item.category_name}
                                   </p>
                                 </div>
                               </div>
@@ -528,9 +836,15 @@ export function AdminPortalPage({
                               <ReportTypeText type={item.report_type} />
                             </td>
                             <td className="py-4 px-4 text-xs text-slate-600">
-                              <p className="font-medium text-[#0F2544]">{item.student_name}</p>
-                              <p className="font-mono text-slate-500">{item.usn}</p>
-                              <p className="text-slate-500">{item.phone}</p>
+                              <p className="font-medium text-[#0F2544]">{item.reporter_name}</p>
+                              {reporter ? (
+                                <>
+                                  <p className="font-mono text-slate-500">{reporter.usn}</p>
+                                  <p className="text-slate-500">{reporter.phone}</p>
+                                </>
+                              ) : (
+                                <p className="text-slate-400">Campus Seed Record</p>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-xs text-slate-600">
                               <p className="tabular-nums font-medium text-[#0F2544]">
@@ -626,99 +940,116 @@ export function AdminPortalPage({
               <div className="bg-white border border-slate-200 rounded-xl p-6 text-sm text-slate-500">
                 Loading ownership claims...
               </div>
-            ) : claims.length === 0 ? (
+            ) : filteredClaims.length === 0 ? (
               <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-sm text-slate-500">
                 No ownership claims found for this filter.
               </div>
             ) : (
               <div className="space-y-4">
-                {claims.map((cl) => (
-                  <div
-                    key={cl.claim_id}
-                    className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col lg:flex-row justify-between gap-6"
-                  >
-                    <div className="space-y-3 flex-1">
-                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                        <span className="font-mono font-semibold text-[#0F2544] tabular-nums">
-                          Claim #{cl.claim_id}
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <ClaimStatusLabel status={cl.claim_status} />
-                        <span aria-hidden="true">·</span>
-                        <ItemStatusLabel status={cl.item_status} />
-                        <span aria-hidden="true">·</span>
-                        <span className="tabular-nums">{formatDate(cl.created_at)}</span>
-                      </div>
-
-                      <div>
-                        <h3 className="font-display text-lg font-bold text-[#0F2544]">
-                          {cl.item_name}
-                        </h3>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          {cl.category_name} · {cl.location} · Reported by {cl.reporter_name} (
-                          <span className="font-mono">{cl.reporter_usn}</span>)
-                        </p>
-                      </div>
-
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-100 text-sm">
-                        <div>
-                          <p className="text-xs font-semibold text-slate-500">Claimant Student</p>
-                          <p className="mt-1 font-medium text-[#0F2544]">
-                            {cl.claimant_name}{' '}
-                            <span className="font-mono text-xs text-slate-500">({cl.claimant_usn})</span>
-                          </p>
-                          <p className="text-xs text-slate-600 mt-0.5">
-                            {cl.claimant_email} · {cl.claimant_phone}
-                          </p>
+                {filteredClaims.map((cl) => {
+                  const linkedItem = itemsMap.get(cl.item_id);
+                  const currentItemStatus = linkedItem?.status || 'approved';
+                  const reporter = linkedItem ? usersMap.get(linkedItem.user_id) : undefined;
+                  return (
+                    <div
+                      key={cl.claim_id}
+                      className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col lg:flex-row justify-between gap-6"
+                    >
+                      <div className="space-y-3 flex-1">
+                        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                          <span className="font-mono font-semibold text-[#0F2544] tabular-nums">
+                            Claim {cl.claim_id.slice(0, 8)}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <ClaimStatusLabel status={cl.claim_status} />
+                          <span aria-hidden="true">·</span>
+                          <ItemStatusLabel status={currentItemStatus} />
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">{formatDate(cl.created_at)}</span>
                         </div>
 
                         <div>
-                          <p className="text-xs font-semibold text-slate-500">Ownership Reason &amp; Proof</p>
-                          <p className="mt-1 text-sm text-slate-700">{cl.claim_description}</p>
-                          {cl.supporting_info && (
-                            <p className="mt-1 text-xs text-slate-600">
-                              Supporting info: {cl.supporting_info}
+                          <h3 className="font-display text-lg font-bold text-[#0F2544]">
+                            {cl.item_name}
+                          </h3>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            {cl.category_name} · {cl.item_location}
+                            {linkedItem && (
+                              <>
+                                {' '}
+                                · Reported by {linkedItem.reporter_name}
+                                {reporter?.usn && (
+                                  <span className="font-mono"> ({reporter.usn})</span>
+                                )}
+                              </>
+                            )}
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-100 text-sm">
+                          <div>
+                            <p className="text-xs font-semibold text-slate-500">Claimant Student</p>
+                            <p className="mt-1 font-medium text-[#0F2544]">
+                              {cl.claimant_name}{' '}
+                              <span className="font-mono text-xs text-slate-500">
+                                ({cl.claimant_usn})
+                              </span>
                             </p>
-                          )}
+                            <p className="text-xs text-slate-600 mt-0.5">
+                              {cl.claimant_email} · {cl.claimant_phone}
+                            </p>
+                          </div>
+
+                          <div>
+                            <p className="text-xs font-semibold text-slate-500">
+                              Ownership Reason &amp; Proof
+                            </p>
+                            <p className="mt-1 text-sm text-slate-700">{cl.claim_description}</p>
+                            {cl.supporting_info && (
+                              <p className="mt-1 text-xs text-slate-600">
+                                Supporting info: {cl.supporting_info}
+                              </p>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    <div className="flex lg:flex-col justify-end gap-2.5 shrink-0">
-                      {cl.claim_status === 'pending' && (
-                        <>
+                      <div className="flex lg:flex-col justify-end gap-2.5 shrink-0">
+                        {cl.claim_status === 'pending' && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleClaimAction(cl, 'approve')}
+                              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#15803D] px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap"
+                            >
+                              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>Approve Claim</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleClaimAction(cl, 'reject')}
+                              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-[#B91C1C] hover:bg-red-100 whitespace-nowrap"
+                            >
+                              <X className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>Reject Claim</span>
+                            </button>
+                          </>
+                        )}
+
+                        {currentItemStatus !== 'returned' && cl.claim_status !== 'rejected' && (
                           <button
                             type="button"
-                            onClick={() => handleClaimAction(cl.claim_id, 'approve')}
-                            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#15803D] px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap"
+                            onClick={() => handleClaimAction(cl, 'mark_returned')}
+                            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#0F2544] px-4 py-2 text-xs font-semibold text-white hover:bg-[#193A68] whitespace-nowrap"
                           >
-                            <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                            <span>Approve Claim</span>
+                            <PackageCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Mark Item Returned</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleClaimAction(cl.claim_id, 'reject')}
-                            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-[#B91C1C] hover:bg-red-100 whitespace-nowrap"
-                          >
-                            <X className="h-3.5 w-3.5" aria-hidden="true" />
-                            <span>Reject Claim</span>
-                          </button>
-                        </>
-                      )}
-
-                      {cl.item_status !== 'returned' && cl.claim_status !== 'rejected' && (
-                        <button
-                          type="button"
-                          onClick={() => handleClaimAction(cl.claim_id, 'mark_returned')}
-                          className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#0F2544] px-4 py-2 text-xs font-semibold text-white hover:bg-[#193A68] whitespace-nowrap"
-                        >
-                          <PackageCheck className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Mark Item Returned</span>
-                        </button>
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -735,7 +1066,7 @@ export function AdminPortalPage({
         >
           <div className="w-full max-w-lg rounded-xl bg-white border border-slate-200 p-6 max-h-[90vh] overflow-y-auto">
             <h2 id="edit-modal-title" className="font-display text-lg font-bold text-[#0F2544]">
-              Edit Report #{editingItem.item_id}
+              Edit Report {editingItem.item_id.slice(0, 8)}
             </h2>
             <form onSubmit={handleSaveEdit} className="mt-4 space-y-4">
               <div>
@@ -746,6 +1077,8 @@ export function AdminPortalPage({
                   id="edit-name"
                   type="text"
                   required
+                  minLength={3}
+                  maxLength={140}
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
                   className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-[#0F2544]"
@@ -826,6 +1159,8 @@ export function AdminPortalPage({
                   id="edit-loc"
                   type="text"
                   required
+                  minLength={3}
+                  maxLength={160}
                   value={editLoc}
                   onChange={(e) => setEditLoc(e.target.value)}
                   className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-[#0F2544]"
@@ -840,6 +1175,8 @@ export function AdminPortalPage({
                   id="edit-desc"
                   rows={3}
                   required
+                  minLength={10}
+                  maxLength={2000}
                   value={editDesc}
                   onChange={(e) => setEditDesc(e.target.value)}
                   className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-[#0F2544]"
@@ -849,6 +1186,7 @@ export function AdminPortalPage({
               <div className="pt-2 flex justify-end gap-3">
                 <button
                   type="button"
+                  disabled={savingEdit}
                   onClick={() => setEditingItem(null)}
                   className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700"
                 >
@@ -856,9 +1194,10 @@ export function AdminPortalPage({
                 </button>
                 <button
                   type="submit"
-                  className="rounded-lg bg-[#0F2544] px-4 py-2 text-xs font-semibold text-white hover:bg-[#193A68]"
+                  disabled={savingEdit}
+                  className="rounded-lg bg-[#0F2544] px-4 py-2 text-xs font-semibold text-white hover:bg-[#193A68] disabled:opacity-60"
                 >
-                  Save Changes
+                  {savingEdit ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>
             </form>
@@ -876,14 +1215,15 @@ export function AdminPortalPage({
         >
           <div className="w-full max-w-md rounded-xl bg-white border border-slate-200 p-6">
             <h2 id="delete-modal-title" className="font-display text-lg font-bold text-[#0F2544]">
-              Delete Report #{deletingItem.item_id}?
+              Delete Report {deletingItem.item_id.slice(0, 8)}?
             </h2>
             <p className="mt-2 text-sm text-slate-600">
-              This will permanently remove <strong>{deletingItem.item_name}</strong> and any associated ownership claims from the database.
+              This will permanently remove <strong>{deletingItem.item_name}</strong> and any associated ownership claims from Firestore.
             </p>
             <div className="mt-6 flex justify-end gap-3">
               <button
                 type="button"
+                disabled={deletingBusy}
                 onClick={() => setDeletingItem(null)}
                 className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700"
               >
@@ -891,10 +1231,11 @@ export function AdminPortalPage({
               </button>
               <button
                 type="button"
+                disabled={deletingBusy}
                 onClick={confirmDelete}
-                className="rounded-lg bg-[#B91C1C] px-4 py-2 text-xs font-semibold text-white hover:bg-red-800"
+                className="rounded-lg bg-[#B91C1C] px-4 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60"
               >
-                Delete Report
+                {deletingBusy ? 'Deleting...' : 'Delete Report'}
               </button>
             </div>
           </div>

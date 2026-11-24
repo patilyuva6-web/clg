@@ -1,7 +1,9 @@
 import { ArrowRight, FilePlus2, Search } from 'lucide-react';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../api';
+import { timestampToIso } from '../api';
 import { ItemCard } from '../components/ItemCard';
+import { DEFAULT_CATEGORIES, OperationType, db, handleFirestoreError } from '../firebase';
 import type { ItemRecord, PageRoute, PublicStats, StudentUser } from '../types';
 
 interface HomePageProps {
@@ -11,30 +13,74 @@ interface HomePageProps {
 
 export function HomePage({ student, onNavigate }: HomePageProps) {
   const [recentItems, setRecentItems] = useState<ItemRecord[]>([]);
-  const [stats, setStats] = useState<PublicStats | null>(null);
+  const [stats, setStats] = useState<PublicStats>({
+    active_lost: 0,
+    active_found: 0,
+    returned_count: 0,
+    category_count: DEFAULT_CATEGORIES.length,
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let active = true;
-    async function loadHome() {
-      try {
-        const [itemsRes, statsRes] = await Promise.all([
-          apiFetch<{ items: ItemRecord[] }>('/api/items?limit=6'),
-          apiFetch<PublicStats>('/api/stats/public'),
-        ]);
-        if (active) {
-          setRecentItems(itemsRes.items);
-          setStats(statsRes);
-        }
-      } catch {
-        // Handled cleanly via empty fallback
-      } finally {
-        if (active) setLoading(false);
+    const itemsQuery = query(
+      collection(db, 'items'),
+      where('status', 'in', ['approved', 'returned'])
+    );
+
+    const unsubItems = onSnapshot(
+      itemsQuery,
+      (snapshot) => {
+        const mapped: ItemRecord[] = snapshot.docs.map((d) => {
+          const data = d.data();
+          return {
+            item_id: d.id,
+            user_id: String(data.user_id || ''),
+            category_id: String(data.category_id || ''),
+            category_name: String(data.category_name || ''),
+            item_name: String(data.item_name || ''),
+            description: String(data.description || ''),
+            report_type: data.report_type === 'lost' ? 'lost' : 'found',
+            item_date: String(data.item_date || ''),
+            location: String(data.location || ''),
+            image: typeof data.image === 'string' ? data.image : null,
+            status: data.status as ItemRecord['status'],
+            created_at: timestampToIso(data.created_at),
+            reporter_name: String(data.reporter_name || 'Campus Member'),
+          };
+        });
+
+        mapped.sort((a, b) => b.created_at.localeCompare(a.created_at));
+        setRecentItems(mapped.slice(0, 6));
+        setStats((prev) => ({
+          ...prev,
+          active_lost: mapped.filter((i) => i.status === 'approved' && i.report_type === 'lost').length,
+          active_found: mapped.filter((i) => i.status === 'approved' && i.report_type === 'found').length,
+          returned_count: mapped.filter((i) => i.status === 'returned').length,
+        }));
+        setLoading(false);
+      },
+      (error) => {
+        setLoading(false);
+        handleFirestoreError(error, OperationType.LIST, 'items');
       }
-    }
-    loadHome();
+    );
+
+    const unsubCats = onSnapshot(
+      collection(db, 'categories'),
+      (snapshot) => {
+        setStats((prev) => ({
+          ...prev,
+          category_count: snapshot.empty ? DEFAULT_CATEGORIES.length : snapshot.size,
+        }));
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'categories');
+      }
+    );
+
     return () => {
-      active = false;
+      unsubItems();
+      unsubCats();
     };
   }, []);
 
@@ -52,7 +98,7 @@ export function HomePage({ student, onNavigate }: HomePageProps) {
                 Centralized Lost &amp; Found Registry for Campus Belongings
               </h1>
               <p className="mt-4 text-base leading-relaxed text-slate-600 max-w-xl">
-                Report misplaced electronics, ID cards, books, and personal items across campus buildings. Every listing and ownership claim is verified by the Student Welfare Office before handover.
+                Report misplaced electronics, ID cards, books, and personal items across campus buildings. Every listing and ownership claim updates in real time and is verified by the Student Welfare Office.
               </p>
 
               <div className="mt-8 flex flex-wrap items-center gap-4">
@@ -108,7 +154,7 @@ export function HomePage({ student, onNavigate }: HomePageProps) {
                     Central Library · Academic Blocks · Cafeteria · Labs
                   </p>
                   <p className="mt-1 font-display text-sm font-semibold text-white">
-                    Verified student identity and administrator-moderated claims
+                    Real-time campus database with verified student sign-in
                   </p>
                 </div>
               </div>
@@ -120,25 +166,25 @@ export function HomePage({ student, onNavigate }: HomePageProps) {
             <div className="p-5">
               <p className="text-xs font-medium text-slate-500">Active Lost Reports</p>
               <p className="mt-1.5 font-display text-2xl font-bold text-[#0F2544] tabular-nums">
-                {stats ? stats.active_lost : '—'}
+                {loading ? '—' : stats.active_lost}
               </p>
             </div>
             <div className="p-5">
               <p className="text-xs font-medium text-slate-500">Found &amp; Held Items</p>
               <p className="mt-1.5 font-display text-2xl font-bold text-[#0F2544] tabular-nums">
-                {stats ? stats.active_found : '—'}
+                {loading ? '—' : stats.active_found}
               </p>
             </div>
             <div className="p-5">
               <p className="text-xs font-medium text-slate-500">Items Returned to Owners</p>
               <p className="mt-1.5 font-display text-2xl font-bold text-[#15803D] tabular-nums">
-                {stats ? stats.returned_count : '—'}
+                {loading ? '—' : stats.returned_count}
               </p>
             </div>
             <div className="p-5">
               <p className="text-xs font-medium text-slate-500">Tracked Categories</p>
               <p className="mt-1.5 font-display text-2xl font-bold text-[#0F2544] tabular-nums">
-                {stats ? stats.category_count : '—'}
+                {stats.category_count}
               </p>
             </div>
           </div>
@@ -245,7 +291,7 @@ export function HomePage({ student, onNavigate }: HomePageProps) {
               Recently Reported Items
             </h2>
             <p className="mt-1.5 text-sm text-slate-600">
-              Approved lost and found records published across campus buildings.
+              Approved lost and found records synced live across campus buildings.
             </p>
           </div>
           <button
@@ -271,7 +317,7 @@ export function HomePage({ student, onNavigate }: HomePageProps) {
           <div className="mt-8 rounded-xl border border-slate-200 bg-white p-10 text-center">
             <p className="text-sm font-medium text-[#0F2544]">No approved items listed yet.</p>
             <p className="mt-1 text-sm text-slate-500">
-              Submit a lost or found item report to populate the campus registry.
+              Sign in to submit a lost or found item report, or open Admin Portal to publish campus listings.
             </p>
           </div>
         ) : (

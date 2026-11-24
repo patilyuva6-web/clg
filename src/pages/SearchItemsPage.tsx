@@ -1,71 +1,164 @@
 import { RotateCcw, Search } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
-import { apiFetch } from '../api';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { useEffect, useMemo, useState } from 'react';
+import { timestampToIso } from '../api';
 import { ItemCard } from '../components/ItemCard';
-import type { Category, ItemRecord, PageRoute } from '../types';
+import { DEFAULT_CATEGORIES, OperationType, db, handleFirestoreError } from '../firebase';
+import type { Category, ItemRecord, PageRoute, StudentUser } from '../types';
 
 interface SearchItemsPageProps {
-  token: string | null;
+  student: StudentUser | null;
   onNavigate: (route: PageRoute) => void;
 }
 
-export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [items, setItems] = useState<ItemRecord[]>([]);
+export function SearchItemsPage({ student, onNavigate }: SearchItemsPageProps) {
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [publicItems, setPublicItems] = useState<ItemRecord[]>([]);
+  const [myItems, setMyItems] = useState<ItemRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const [query, setQuery] = useState('');
+  const [queryText, setQueryText] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [reportType, setReportType] = useState<'all' | 'lost' | 'found'>('all');
   const [dateFilter, setDateFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
 
   useEffect(() => {
-    apiFetch<{ categories: Category[] }>('/api/categories')
-      .then((res) => setCategories(res.categories))
-      .catch(() => {});
-  }, []);
+    const unsubCats = onSnapshot(
+      collection(db, 'categories'),
+      (snapshot) => {
+        if (!snapshot.empty) {
+          setCategories(
+            snapshot.docs.map((d) => ({
+              category_id: d.id,
+              category_name: String(d.data().category_name || ''),
+            }))
+          );
+        }
+      },
+      (error) => handleFirestoreError(error, OperationType.LIST, 'categories')
+    );
 
-  const fetchItems = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (query.trim()) params.set('q', query.trim());
-      if (categoryId) params.set('category_id', categoryId);
-      if (reportType !== 'all') params.set('report_type', reportType);
-      if (dateFilter) params.set('date', dateFilter);
-      if (locationFilter.trim()) params.set('location', locationFilter.trim());
+    const publicQuery = query(
+      collection(db, 'items'),
+      where('status', 'in', ['approved', 'returned'])
+    );
 
-      const res = await apiFetch<{ items: ItemRecord[] }>(`/api/items?${params.toString()}`, {
-        token,
-      });
-      setItems(res.items);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to search items.');
-    } finally {
-      setLoading(false);
+    const unsubPublic = onSnapshot(
+      publicQuery,
+      (snapshot) => {
+        const mapped: ItemRecord[] = snapshot.docs.map((d) => {
+          const data = d.data();
+          return {
+            item_id: d.id,
+            user_id: String(data.user_id || ''),
+            category_id: String(data.category_id || ''),
+            category_name: String(data.category_name || ''),
+            item_name: String(data.item_name || ''),
+            description: String(data.description || ''),
+            report_type: data.report_type === 'lost' ? 'lost' : 'found',
+            item_date: String(data.item_date || ''),
+            location: String(data.location || ''),
+            image: typeof data.image === 'string' ? data.image : null,
+            status: data.status as ItemRecord['status'],
+            created_at: timestampToIso(data.created_at),
+            reporter_name: String(data.reporter_name || 'Campus Member'),
+          };
+        });
+        setPublicItems(mapped);
+        setLoading(false);
+      },
+      (error) => {
+        setLoading(false);
+        handleFirestoreError(error, OperationType.LIST, 'items');
+      }
+    );
+
+    let unsubMine: (() => void) | undefined;
+    if (student) {
+      const myQuery = query(
+        collection(db, 'items'),
+        where('user_id', '==', student.user_id)
+      );
+      unsubMine = onSnapshot(
+        myQuery,
+        (snapshot) => {
+          const mapped: ItemRecord[] = snapshot.docs
+            .map((d) => {
+              const data = d.data();
+              return {
+                item_id: d.id,
+                user_id: String(data.user_id || ''),
+                category_id: String(data.category_id || ''),
+                category_name: String(data.category_name || ''),
+                item_name: String(data.item_name || ''),
+                description: String(data.description || ''),
+                report_type: (data.report_type === 'lost' ? 'lost' : 'found') as ItemRecord['report_type'],
+                item_date: String(data.item_date || ''),
+                location: String(data.location || ''),
+                image: typeof data.image === 'string' ? data.image : null,
+                status: data.status as ItemRecord['status'],
+                created_at: timestampToIso(data.created_at),
+                reporter_name: String(data.reporter_name || student.student_name),
+              };
+            })
+            .filter((item) => item.status === 'pending');
+          setMyItems(mapped);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, 'items')
+      );
+    } else {
+      setMyItems([]);
     }
-  }, [query, categoryId, reportType, dateFilter, locationFilter, token]);
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchItems();
-    }, 180);
-    return () => clearTimeout(timer);
-  }, [fetchItems]);
+    return () => {
+      unsubCats();
+      unsubPublic();
+      if (unsubMine) unsubMine();
+    };
+  }, [student]);
+
+  const filteredItems = useMemo(() => {
+    const map = new Map<string, ItemRecord>();
+    for (const item of [...myItems, ...publicItems]) {
+      map.set(item.item_id, item);
+    }
+    const all = Array.from(map.values()).sort((a, b) =>
+      b.created_at.localeCompare(a.created_at)
+    );
+
+    const q = queryText.trim().toLowerCase();
+    const loc = locationFilter.trim().toLowerCase();
+
+    return all.filter((item) => {
+      if (reportType !== 'all' && item.report_type !== reportType) return false;
+      if (categoryId && item.category_id !== categoryId) return false;
+      if (dateFilter && item.item_date !== dateFilter) return false;
+      if (loc && !item.location.toLowerCase().includes(loc)) return false;
+      if (
+        q &&
+        !item.item_name.toLowerCase().includes(q) &&
+        !item.description.toLowerCase().includes(q) &&
+        !item.location.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [myItems, publicItems, queryText, categoryId, reportType, dateFilter, locationFilter]);
 
   const resetFilters = () => {
-    setQuery('');
+    setQueryText('');
     setCategoryId('');
     setReportType('all');
     setDateFilter('');
     setLocationFilter('');
   };
 
-  const hasFilters = Boolean(query || categoryId || reportType !== 'all' || dateFilter || locationFilter);
-  const pendingCount = items.filter((item) => item.status === 'pending').length;
+  const hasFilters = Boolean(
+    queryText || categoryId || reportType !== 'all' || dateFilter || locationFilter
+  );
+  const pendingCount = filteredItems.filter((item) => item.status === 'pending').length;
 
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-10">
@@ -75,7 +168,7 @@ export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
             Campus Lost &amp; Found Directory
           </h1>
           <p className="mt-1.5 text-sm text-slate-600">
-            Search verified lost and found reports across all campus blocks and facilities.
+            Search live lost and found reports across all campus blocks and facilities.
           </p>
         </div>
 
@@ -113,8 +206,8 @@ export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
               <input
                 id="search-q"
                 type="search"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                value={queryText}
+                onChange={(e) => setQueryText(e.target.value)}
                 placeholder="Item name, brand, or description..."
                 className="block w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3.5 py-2 text-sm text-[#0F2544] focus:border-[#1D4ED8] focus:outline-none focus:ring-2 focus:ring-[#1D4ED8]/20"
               />
@@ -170,7 +263,7 @@ export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
 
         <div className="mt-4 pt-3.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
           <span className="tabular-nums">
-            Showing {items.length} {items.length === 1 ? 'record' : 'records'}
+            Showing {filteredItems.length} {filteredItems.length === 1 ? 'record' : 'records'}
             {pendingCount > 0 && (
               <span> · Includes {pendingCount} of your pending submissions awaiting admin approval</span>
             )}
@@ -188,16 +281,10 @@ export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
         </div>
       </div>
 
-      {!token && (
+      {!student && (
         <p className="mt-4 text-xs text-slate-500">
           Note: Newly submitted reports remain Pending Review until approved by an administrator. Sign in to view your own pending submissions.
         </p>
-      )}
-
-      {error && (
-        <div role="alert" className="mt-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
-          {error}
-        </div>
       )}
 
       {/* Results Grid */}
@@ -207,7 +294,7 @@ export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
             <div key={n} className="h-80 rounded-xl border border-slate-200 bg-white animate-pulse" />
           ))}
         </div>
-      ) : items.length === 0 ? (
+      ) : filteredItems.length === 0 ? (
         <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center">
           <p className="font-display text-base font-semibold text-[#0F2544]">
             No matching items found
@@ -236,7 +323,7 @@ export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
         </div>
       ) : (
         <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {items.map((item) => (
+          {filteredItems.map((item) => (
             <ItemCard
               key={item.item_id}
               item={item}

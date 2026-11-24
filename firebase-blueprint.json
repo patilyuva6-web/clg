@@ -1,0 +1,132 @@
+{
+  "entities": {
+    "User": {
+      "title": "Student User Profile",
+      "description": "Registered college student profile containing academic identity and private contact details.",
+      "type": "object",
+      "properties": {
+        "student_name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "usn": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "phone": { "type": "string", "minLength": 7, "maxLength": 22 },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["student_name", "usn", "email", "phone", "created_at"]
+    },
+    "Admin": {
+      "title": "Campus Administrator",
+      "description": "Authorized campus staff member allowed to moderate reports and verify ownership claims.",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "email", "created_at"]
+    },
+    "Category": {
+      "title": "Item Category",
+      "description": "Classification label for lost and found campus belongings.",
+      "type": "object",
+      "properties": {
+        "category_name": { "type": "string", "minLength": 2, "maxLength": 80 }
+      },
+      "required": ["category_name"]
+    },
+    "Item": {
+      "title": "Lost or Found Item Report",
+      "description": "Reported campus item with non-PII reporter display name and moderation status.",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reporter_name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "category_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "category_name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "item_name": { "type": "string", "minLength": 3, "maxLength": 140 },
+        "description": { "type": "string", "minLength": 10, "maxLength": 2000 },
+        "report_type": { "type": "string", "enum": ["lost", "found"] },
+        "item_date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "location": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "image": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "returned"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "user_id",
+        "reporter_name",
+        "category_id",
+        "category_name",
+        "item_name",
+        "description",
+        "report_type",
+        "item_date",
+        "location",
+        "status",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "Claim": {
+      "title": "Ownership Claim",
+      "description": "Student claim submitted to verify ownership of an approved campus item.",
+      "type": "object",
+      "properties": {
+        "item_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "item_name": { "type": "string", "minLength": 3, "maxLength": 140 },
+        "item_location": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "item_report_type": { "type": "string", "enum": ["lost", "found"] },
+        "category_name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "user_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "claimant_name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "claimant_usn": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "claimant_email": { "type": "string", "format": "email", "maxLength": 160 },
+        "claimant_phone": { "type": "string", "minLength": 7, "maxLength": 22 },
+        "claim_description": { "type": "string", "minLength": 10, "maxLength": 2000 },
+        "supporting_info": { "type": "string", "maxLength": 2000 },
+        "claim_status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "item_id",
+        "item_name",
+        "item_location",
+        "item_report_type",
+        "category_name",
+        "user_id",
+        "claimant_name",
+        "claimant_usn",
+        "claimant_email",
+        "claimant_phone",
+        "claim_description",
+        "supporting_info",
+        "claim_status",
+        "created_at",
+        "updated_at"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Private student profile documents accessible only to the owning student and administrators."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Administrator registry documents used for role verification."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Public item category definitions managed by administrators."
+    },
+    "/items/{itemId}": {
+      "schema": { "$ref": "#/entities/Item" },
+      "description": "Lost and found item reports. Publicly readable once approved or returned; pending/rejected items are restricted to owner and admins."
+    },
+    "/claims/{claimId}": {
+      "schema": { "$ref": "#/entities/Claim" },
+      "description": "Ownership verification claims readable only by the claimant student and administrators."
+    }
+  }
+}
