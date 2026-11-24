@@ -133,7 +133,7 @@ export default function App() {
           />
         )}
 
-        {route.name === 'search' && <SearchItemsPage onNavigate={navigate} />}
+        {route.name === 'search' && <SearchItemsPage token={studentToken} onNavigate={navigate} />}
 
         {route.name === 'details' && (
           <ItemDetailsPage

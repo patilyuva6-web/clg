@@ -1,7 +1,7 @@
 import { CheckCircle2, ImagePlus, Lock } from 'lucide-react';
 import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
-import { apiFetch } from '../api';
-import type { Category, PageRoute, ReportType, StudentUser } from '../types';
+import { apiFetch, safeImageUrl } from '../api';
+import type { Category, ItemRecord, PageRoute, ReportType, StudentUser } from '../types';
 
 interface ReportItemPageProps {
   reportType: ReportType;
@@ -29,11 +29,11 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [submittedSuccess, setSubmittedSuccess] = useState(false);
+  const [submittedItem, setSubmittedItem] = useState<ItemRecord | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    setSubmittedSuccess(false);
+    setSubmittedItem(null);
     setError(null);
   }, [reportType]);
 
@@ -94,18 +94,19 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
         formData.append('image', file);
       }
 
-      await apiFetch('/api/student/items', {
+      const res = await apiFetch<{ item: ItemRecord }>('/api/student/items', {
         method: 'POST',
         formData,
         token,
       });
 
-      setSubmittedSuccess(true);
+      setSubmittedItem(res.item);
       setItemName('');
       setDescription('');
       setLocation('');
       setFile(null);
       setPreviewUrl(null);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to submit report.');
     } finally {
@@ -166,28 +167,43 @@ export function ReportItemPage({ reportType, student, token, onNavigate }: Repor
           </p>
         </div>
 
-        {submittedSuccess && (
+        {submittedItem && (
           <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 p-5">
             <div className="flex items-start gap-3">
               <CheckCircle2 className="h-5 w-5 text-[#15803D] shrink-0 mt-0.5" aria-hidden="true" />
-              <div>
+              <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-[#0F2544]">
-                  Report submitted and queued for administrator verification.
+                  Report #{submittedItem.item_id} (“{submittedItem.item_name}”) saved as Pending Review.
                 </p>
                 <p className="mt-1 text-sm text-slate-600">
-                  Once approved by the campus administrator, your listing will be visible in the Search &amp; Listings registry.
+                  You can view it right now in <strong>My Portal</strong> or <strong>Browse Items</strong> while signed in. It becomes visible to everyone else once approved in the Admin Portal.
                 </p>
+                {safeImageUrl(submittedItem.image) && (
+                  <img
+                    src={safeImageUrl(submittedItem.image)!}
+                    alt={submittedItem.item_name}
+                    referrerPolicy="no-referrer"
+                    className="mt-3 h-20 w-28 rounded-lg border border-emerald-200 object-cover"
+                  />
+                )}
                 <div className="mt-4 flex flex-wrap gap-3">
                   <button
                     type="button"
-                    onClick={() => onNavigate({ name: 'student-dashboard' })}
+                    onClick={() => onNavigate({ name: 'details', itemId: submittedItem.item_id })}
                     className="rounded-lg bg-[#0F2544] px-4 py-2 text-xs font-semibold text-white hover:bg-[#193A68]"
+                  >
+                    Open Uploaded Item
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onNavigate({ name: 'student-dashboard' })}
+                    className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-[#0F2544] hover:bg-slate-50"
                   >
                     View My Portal
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSubmittedSuccess(false)}
+                    onClick={() => setSubmittedItem(null)}
                     className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-[#0F2544] hover:bg-slate-50"
                   >
                     Submit Another Report

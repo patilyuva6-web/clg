@@ -1,6 +1,6 @@
 import { FilePlus2, LogOut, Search } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { apiFetch, formatDate } from '../api';
+import { apiFetch, formatDate, safeImageUrl } from '../api';
 import { ClaimStatusLabel, ItemStatusLabel, ReportTypeText } from '../components/StatusText';
 import type { ClaimRecord, ItemRecord, PageRoute, StudentUser } from '../types';
 
@@ -158,9 +158,23 @@ export function StudentDashboardPage({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-sm">
-                {reports.map((rep) => (
+                {reports.map((rep) => {
+                  const thumb = safeImageUrl(rep.image);
+                  return (
                   <tr key={rep.item_id} className="hover:bg-slate-50/70">
-                    <td className="py-3.5 px-6 font-medium text-[#0F2544]">{rep.item_name}</td>
+                    <td className="py-3.5 px-6 font-medium text-[#0F2544]">
+                      <div className="flex items-center gap-3">
+                        {thumb && (
+                          <img
+                            src={thumb}
+                            alt={rep.item_name}
+                            referrerPolicy="no-referrer"
+                            className="h-10 w-14 rounded border border-slate-200 object-cover shrink-0"
+                          />
+                        )}
+                        <span>{rep.item_name}</span>
+                      </div>
+                    </td>
                     <td className="py-3.5 px-4 text-xs">
                       <ReportTypeText type={rep.report_type} />
                     </td>
@@ -182,7 +196,8 @@ export function StudentDashboardPage({
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

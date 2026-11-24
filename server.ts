@@ -118,6 +118,7 @@ function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): vo
 // Validate uploaded image bytes (JPEG, PNG, WebP)
 function detectImageExtension(buffer: Buffer, mime: string): string | null {
   if (buffer.length < 12) return null;
+  const cleanMime = mime.toLowerCase();
   const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
   const isPng =
     buffer[0] === 0x89 &&
@@ -132,9 +133,9 @@ function detectImageExtension(buffer: Buffer, mime: string): string | null {
     buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
     buffer.subarray(8, 12).toString('ascii') === 'WEBP';
 
-  if (isJpeg && (mime === 'image/jpeg' || mime === 'image/jpg')) return '.jpg';
-  if (isPng && mime === 'image/png') return '.png';
-  if (isWebp && mime === 'image/webp') return '.webp';
+  if (isJpeg && (!cleanMime || cleanMime.includes('jpeg') || cleanMime.includes('jpg') || cleanMime === 'application/octet-stream')) return '.jpg';
+  if (isPng && (!cleanMime || cleanMime.includes('png') || cleanMime === 'application/octet-stream')) return '.png';
+  if (isWebp && (!cleanMime || cleanMime.includes('webp') || cleanMime === 'application/octet-stream')) return '.webp';
   return null;
 }
 
@@ -190,7 +191,7 @@ app.get('/api/stats/public', (_req: Request, res: Response) => {
   });
 });
 
-app.get('/api/items', (req: Request, res: Response) => {
+app.get('/api/items', optionalAuth, (req: AuthedRequest, res: Response) => {
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   const categoryId = req.query.category_id ? Number(req.query.category_id) : null;
   const reportType =
@@ -207,6 +208,9 @@ app.get('/api/items', (req: Request, res: Response) => {
   if (statusFilter) {
     conditions.push('i.status = ?');
     params.push(statusFilter);
+  } else if (req.auth?.role === 'student') {
+    conditions.push("(i.status IN ('approved', 'returned') OR (i.user_id = ? AND i.status = 'pending'))");
+    params.push(req.auth.id);
   } else {
     conditions.push("i.status IN ('approved', 'returned')");
   }
@@ -354,66 +358,86 @@ app.get('/api/items/:id', optionalAuth, (req: AuthedRequest, res: Response) => {
 // ========================
 
 app.post('/api/student/register', (req: Request, res: Response) => {
-  const { student_name, usn, email, phone, password, confirm_password } = req.body ?? {};
+  try {
+    const { student_name, usn, email, phone, password, confirm_password } = req.body ?? {};
 
-  const name = typeof student_name === 'string' ? student_name.trim() : '';
-  const cleanUsn = typeof usn === 'string' ? usn.trim().toUpperCase() : '';
-  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-  const cleanPhone = typeof phone === 'string' ? phone.trim() : '';
-  const rawPass = typeof password === 'string' ? password : '';
-  const rawConfirm = typeof confirm_password === 'string' ? confirm_password : '';
+    const name = typeof student_name === 'string' ? student_name.trim() : '';
+    const cleanUsn = typeof usn === 'string' ? usn.trim().replace(/\s+/g, ' ').toUpperCase() : '';
+    const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const cleanPhone = typeof phone === 'string' ? phone.trim() : '';
+    const phoneDigits = cleanPhone.replace(/\D/g, '');
+    const rawPass = typeof password === 'string' ? password : '';
+    const rawConfirm = typeof confirm_password === 'string' ? confirm_password : '';
 
-  if (name.length < 2 || name.length > 100) {
-    res.status(400).json({ error: 'Please enter your full student name (2–100 characters).' });
-    return;
-  }
-  if (!/^[A-Z0-9-]{4,24}$/.test(cleanUsn)) {
-    res.status(400).json({ error: 'Please enter a valid USN or College ID (4–24 alphanumeric characters).' });
-    return;
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-    res.status(400).json({ error: 'Please enter a valid college or personal email address.' });
-    return;
-  }
-  if (!/^[0-9+\-\s]{7,18}$/.test(cleanPhone)) {
-    res.status(400).json({ error: 'Please enter a valid phone number.' });
-    return;
-  }
-  if (rawPass.length < 6) {
-    res.status(400).json({ error: 'Password must be at least 6 characters long.' });
-    return;
-  }
-  if (rawPass !== rawConfirm) {
-    res.status(400).json({ error: 'Password and Confirm Password do not match.' });
-    return;
-  }
+    if (name.length < 2 || name.length > 100) {
+      res.status(400).json({ error: 'Please enter your full student name (2–100 characters).' });
+      return;
+    }
+    if (!/^[A-Z0-9\s/_.-]{2,32}$/.test(cleanUsn)) {
+      res.status(400).json({
+        error: 'Please enter a valid USN or College ID (2–32 letters, numbers, spaces, dashes, or slashes).',
+      });
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      res.status(400).json({ error: 'Please enter a valid college or personal email address.' });
+      return;
+    }
+    if (phoneDigits.length < 7 || phoneDigits.length > 15 || !/^[0-9+\-\s()]{7,22}$/.test(cleanPhone)) {
+      res.status(400).json({ error: 'Please enter a valid phone number (7–15 digits).' });
+      return;
+    }
+    if (rawPass.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+      return;
+    }
+    if (rawPass !== rawConfirm) {
+      res.status(400).json({ error: 'Password and Confirm Password do not match.' });
+      return;
+    }
 
-  const existing = db
-    .prepare('SELECT user_id FROM users WHERE email = ? OR usn = ?')
-    .get(cleanEmail, cleanUsn);
-  if (existing) {
-    res.status(409).json({ error: 'An account with this USN or Email is already registered.' });
-    return;
+    const existingEmail = db
+      .prepare('SELECT user_id FROM users WHERE LOWER(email) = LOWER(?)')
+      .get(cleanEmail);
+    if (existingEmail) {
+      res.status(409).json({
+        error: 'This email address is already registered. Please sign in instead.',
+      });
+      return;
+    }
+
+    const existingUsn = db
+      .prepare('SELECT user_id FROM users WHERE UPPER(usn) = UPPER(?)')
+      .get(cleanUsn);
+    if (existingUsn) {
+      res.status(409).json({
+        error: 'This USN / College ID is already registered. Please sign in instead.',
+      });
+      return;
+    }
+
+    const hashed = hashPassword(rawPass);
+    const result = db
+      .prepare('INSERT INTO users (student_name, usn, email, phone, password) VALUES (?, ?, ?, ?, ?)')
+      .run(name, cleanUsn, cleanEmail, cleanPhone, hashed);
+
+    const userId = Number(result.lastInsertRowid);
+    const token = issueToken({ role: 'student', id: userId, name, usn: cleanUsn });
+
+    res.status(201).json({
+      token,
+      user: {
+        user_id: userId,
+        student_name: name,
+        usn: cleanUsn,
+        email: cleanEmail,
+        phone: cleanPhone,
+      },
+    });
+  } catch (err) {
+    console.error('Registration error:', err);
+    res.status(500).json({ error: 'Unable to complete registration. Please check your details and try again.' });
   }
-
-  const hashed = hashPassword(rawPass);
-  const result = db
-    .prepare('INSERT INTO users (student_name, usn, email, phone, password) VALUES (?, ?, ?, ?, ?)')
-    .run(name, cleanUsn, cleanEmail, cleanPhone, hashed);
-
-  const userId = Number(result.lastInsertRowid);
-  const token = issueToken({ role: 'student', id: userId, name, usn: cleanUsn });
-
-  res.status(201).json({
-    token,
-    user: {
-      user_id: userId,
-      student_name: name,
-      usn: cleanUsn,
-      email: cleanEmail,
-      phone: cleanPhone,
-    },
-  });
 });
 
 app.post('/api/student/login', (req: Request, res: Response) => {
@@ -1045,6 +1069,15 @@ app.patch('/api/admin/claims/:id', requireAdmin, (req: AuthedRequest, res: Respo
 
   processClaimTx();
   res.json({ updated: true });
+});
+
+app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+  if (req.path.startsWith('/api/')) {
+    console.error('API error:', err);
+    res.status(400).json({ error: 'Invalid request payload or server error.' });
+    return;
+  }
+  next(err);
 });
 
 async function startServer() {

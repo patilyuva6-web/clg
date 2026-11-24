@@ -5,10 +5,11 @@ import { ItemCard } from '../components/ItemCard';
 import type { Category, ItemRecord, PageRoute } from '../types';
 
 interface SearchItemsPageProps {
+  token: string | null;
   onNavigate: (route: PageRoute) => void;
 }
 
-export function SearchItemsPage({ onNavigate }: SearchItemsPageProps) {
+export function SearchItemsPage({ token, onNavigate }: SearchItemsPageProps) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [items, setItems] = useState<ItemRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,14 +38,16 @@ export function SearchItemsPage({ onNavigate }: SearchItemsPageProps) {
       if (dateFilter) params.set('date', dateFilter);
       if (locationFilter.trim()) params.set('location', locationFilter.trim());
 
-      const res = await apiFetch<{ items: ItemRecord[] }>(`/api/items?${params.toString()}`);
+      const res = await apiFetch<{ items: ItemRecord[] }>(`/api/items?${params.toString()}`, {
+        token,
+      });
       setItems(res.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to search items.');
     } finally {
       setLoading(false);
     }
-  }, [query, categoryId, reportType, dateFilter, locationFilter]);
+  }, [query, categoryId, reportType, dateFilter, locationFilter, token]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -62,6 +65,7 @@ export function SearchItemsPage({ onNavigate }: SearchItemsPageProps) {
   };
 
   const hasFilters = Boolean(query || categoryId || reportType !== 'all' || dateFilter || locationFilter);
+  const pendingCount = items.filter((item) => item.status === 'pending').length;
 
   return (
     <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-10">
@@ -164,9 +168,12 @@ export function SearchItemsPage({ onNavigate }: SearchItemsPageProps) {
           </div>
         </div>
 
-        <div className="mt-4 pt-3.5 border-t border-slate-100 flex items-center justify-between gap-4 text-xs text-slate-500">
+        <div className="mt-4 pt-3.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
           <span className="tabular-nums">
             Showing {items.length} {items.length === 1 ? 'record' : 'records'}
+            {pendingCount > 0 && (
+              <span> · Includes {pendingCount} of your pending submissions awaiting admin approval</span>
+            )}
           </span>
           {hasFilters && (
             <button
@@ -180,6 +187,12 @@ export function SearchItemsPage({ onNavigate }: SearchItemsPageProps) {
           )}
         </div>
       </div>
+
+      {!token && (
+        <p className="mt-4 text-xs text-slate-500">
+          Note: Newly submitted reports remain Pending Review until approved by an administrator. Sign in to view your own pending submissions.
+        </p>
+      )}
 
       {error && (
         <div role="alert" className="mt-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-[#B91C1C]">
