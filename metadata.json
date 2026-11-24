@@ -1,0 +1,6 @@
+{
+  "name": "CampusFind — College Lost & Found Management System",
+  "description": "Centralized college campus portal for reporting, searching, verifying, and recovering lost and found student belongings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
